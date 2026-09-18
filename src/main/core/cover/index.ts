@@ -1,55 +1,52 @@
 /**
  * 封面补全服务
  *
- * 为什么需要它 —— 这是实测出来的结论：
+ * 为什么要它 —— 这是逐个平台实测出来的封面质量：
  *   · 酷我：5 首歌里只有 1 首带封面字段
  *   · 酷狗：那套 stdmusic 地址对任何专辑都返回同一张 17853 字节的占位图（假图）
  *   · QQ / 网易云 / 咪咕：封面正常
  *
- * 与其给用户看假图或缺图，不如按「歌名 + 歌手」去封面质量最稳的网易云补一张。
- * 封面是跨平台通用的资源，没必要被「当前这首歌来自哪个平台」限制住。
+ * 所以缺图时跨平台去补。**数据源选 QQ 音乐**，理由是实测对比：
+ *   · QQ    —— albumMid 拼出的封面实测 33448 字节真实图，稳定
+ *   · 网易云 —— 接口限流严重（GET 直接回「操作频繁」），且返回的 picUrl 常常为空
+ *
+ * 封面本是跨平台通用资源，没必要被「这首歌来自哪个平台」限制住。
  */
-import { createHash } from 'node:crypto'
-
 import type { Song } from '@shared/types/music'
-import { httpRequest } from '../net/http'
+import { httpRequest, DEFAULT_UA } from '../net/http'
 
-const HEADERS = {
-  Referer: 'https://music.163.com/',
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  Cookie: 'appver=2.0.2; os=pc',
+const QQ_HEADERS = {
+  Referer: 'https://y.qq.com/',
+  'User-Agent': DEFAULT_UA,
   Accept: 'application/json'
 }
 
-/** 网易 CDN 封面密钥（平台固定公开串） */
-const MAGIC = '3go8&$8*3*3h0k(2)2'
+type Json = Record<string, any>
 
-/**
- * 把网易的 picId 转成可直接访问的封面地址。
- * 网易不允许拿 picId 直接取图，必须先做一次「逐字节异或 + md5 取 base64」再拼进 CDN 路径。
- */
-function buildPicUrl(picId: string, size = 300): string | undefined {
-  if (!picId) return undefined
-
-  const key = Buffer.alloc(picId.length)
-  for (let i = 0; i < picId.length; i += 1) {
-    key[i] = picId.charCodeAt(i) ^ MAGIC.charCodeAt(i % MAGIC.length)
-  }
-
-  const encrypted = createHash('md5')
-    .update(key)
-    .digest('base64')
-    .replace(/\//g, '_')
-    .replace(/\+/g, '-')
-
-  return `https://p3.music.126.net/${encrypted}/${picId}.jpg?param=${size}y${size}`
+function asObj(value: unknown): Json {
+  return value && typeof value === 'object' ? (value as Json) : {}
+}
+function asArr(value: unknown): Json[] {
+  return Array.isArray(value) ? (value as Json[]) : []
+}
+function str(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  return typeof value === 'string' ? value : String(value)
 }
 
-/**
- * 缓存：key 为「歌名|歌手」。
- * 封面基本不会变，而且补全要走一次网络搜索，缓存能省掉大量重复请求。
- */
+/** 剥离 JSONP 包裹（QQ 接口有时会给） */
+function unwrapJsonp(body: unknown): unknown {
+  if (typeof body !== 'string') return body
+  const m = /^[\w$.]+\s*\(([\s\S]*)\)\s*;?$/.exec(body.trim())
+  if (!m) return body
+  try {
+    return JSON.parse(m[1])
+  } catch {
+    return body
+  }
+}
+
+/** 缓存：封面基本不变，而且补一张要走一次网络搜索 */
 const cache = new Map<string, string | null>()
 const CACHE_LIMIT = 2000
 
@@ -57,7 +54,7 @@ function cacheKey(song: Song): string {
   return `${song.name}|${song.singer}`.trim().toLowerCase()
 }
 
-/** 去网易云搜一张封面 */
+/** 去 QQ 音乐搜一张封面 */
 async function searchCover(song: Song): Promise<string | null> {
   // 带上第一位歌手，命中率明显高于只用歌名
   const primarySinger = song.singer.split(/[/、,，]/)[0]?.trim() ?? ''
@@ -65,30 +62,23 @@ async function searchCover(song: Song): Promise<string | null> {
   if (!keyword) return null
 
   const url =
-    `https://music.163.com/api/search/get/web?s=${encodeURIComponent(keyword)}` +
-    `&type=1&offset=0&limit=3&total=true`
+    `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=3` +
+    `&w=${encodeURIComponent(keyword)}&format=json&cr=1&new_json=1`
 
-  const res = await httpRequest(url, { method: 'GET', headers: HEADERS, timeout: 8000 })
-  const body = (res.body ?? {}) as Record<string, unknown>
-  const result = (body.result ?? {}) as Record<string, unknown>
-  const list = Array.isArray(result.songs) ? (result.songs as Record<string, unknown>[]) : []
+  const res = await httpRequest(url, { method: 'GET', headers: QQ_HEADERS, timeout: 8000 })
+  const body = asObj(unwrapJsonp(res.body))
+  const list = asArr(asObj(asObj(body.data).song).list)
   if (list.length === 0) return null
 
-  // 优先选歌名完全一致的，避免把翻唱的封面按到原唱头上
+  // 优先歌名完全一致的，避免把翻唱的封面按到原唱头上
   const target = song.name.trim()
-  const picked = list.find((item) => String(item.name ?? '').trim() === target) ?? list[0]
+  const picked =
+    list.find((item) => str(item.title || item.songname).trim() === target) ?? list[0]
 
-  // 老接口用 item.album，新接口用 item.al —— 两个都要试
-  const album = (picked.album ?? {}) as Record<string, unknown>
-  const albumList = Array.isArray(picked.al) ? (picked.al as Record<string, unknown>[]) : []
-  const firstAlbum = albumList[0] ?? {}
+  const albumMid = str(asObj(picked.album).mid)
+  if (!albumMid) return null
 
-  const direct =
-    (typeof album.picUrl === 'string' && album.picUrl) ||
-    (typeof firstAlbum.picUrl === 'string' && firstAlbum.picUrl)
-  if (direct) return direct
-
-  return buildPicUrl(String(album.picId ?? firstAlbum.picId ?? '')) ?? null
+  return `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg`
 }
 
 /**
