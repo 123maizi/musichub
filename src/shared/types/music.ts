@@ -129,6 +129,8 @@ export interface LyricTranslateResult {
   sourceLang?: string
   /** 失败或降级说明 */
   error?: string
+  /** 是否直接命中本地缓存（没有消耗翻译接口的公共额度） */
+  cached?: boolean
 }
 
 /** 搜索结果（按平台分组） */

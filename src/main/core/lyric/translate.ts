@@ -23,6 +23,7 @@
  */
 import type { Lyric } from '@shared/types/music'
 import { httpRequest } from '../net/http'
+import { getCachedTranslation, putCachedTranslation } from './translate-cache'
 
 /** MyMemory 单次查询上限（留余量，按 480 分片） */
 const CHUNK_LIMIT = 480
@@ -68,6 +69,8 @@ export interface TranslateResult {
   totalCount: number
   /** 失败或降级说明（translated 为 false 时给出原因） */
   error?: string
+  /** 是否直接命中的本地缓存（没有消耗接口额度） */
+  cached?: boolean
 }
 
 /**
@@ -145,6 +148,29 @@ function chunkTexts(texts: string[]): string[][] {
 const ERROR_HINT = /QUERY LENGTH LIMIT|INVALID|MYMEMORY WARNING|TOO MANY|IS AN INVALID/i
 
 /**
+ * 把接口的英文报错翻成人话。
+ *
+ * 最要紧的是额度用尽这条：原文是
+ * "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY"，
+ * 用户看到这句会以为自己账号或 token 被扣了。其实它说的是这个公共接口
+ * 按 IP 发的每日免费额度用完了，跟用户的任何账号都无关。必须说清楚。
+ */
+function friendlyError(raw: string): string {
+  if (/USED ALL AVAILABLE FREE TRANSLATIONS/i.test(raw)) {
+    const hit = /NEXT AVAILABLE IN\s+(?:(\d+)\s*HOURS?)?\s*(?:(\d+)\s*MINUTES?)?/i.exec(raw)
+    const hours = hit?.[1] ? Number(hit[1]) : 0
+    const minutes = hit?.[2] ? Number(hit[2]) : 0
+    const parts = [hours ? `${hours} 小时` : '', minutes ? `${minutes} 分钟` : ''].filter(Boolean)
+    const wait = parts.length ? `，约 ${parts.join(' ')}后恢复` : ''
+    return `免费翻译额度今日已用完${wait}。这是翻译接口按 IP 发放的公共额度，不涉及你的任何账号`
+  }
+  if (/QUERY LENGTH LIMIT/i.test(raw)) return '这段歌词超出接口单次长度上限'
+  if (/INVALID SOURCE LANGUAGE/i.test(raw)) return '识别不出这首歌的语言，暂时无法翻译'
+  if (/TOO MANY REQUESTS|429/.test(raw)) return '请求过于频繁，请稍后再试'
+  return raw.slice(0, 140)
+}
+
+/**
  * 翻译一批文本（多行用换行连接，一次请求）。
  * 任何一项校验不过都抛错，由上层决定降级还是放弃。
  */
@@ -164,14 +190,14 @@ async function translateChunk(
   // 校验一：responseStatus 才是真相，HTTP 200 不代表成功
   const status = Number(body.responseStatus ?? 0)
   if (status !== 200) {
-    throw new Error(str(body.responseDetails) || `翻译服务返回状态 ${status}`)
+    throw new Error(friendlyError(str(body.responseDetails) || `翻译服务返回状态 ${status}`))
   }
 
   const translated = str(asObj(body.responseData).translatedText)
 
   // 校验二：内容本身可能是错误提示
   if (ERROR_HINT.test(translated)) {
-    throw new Error(translated.slice(0, 140))
+    throw new Error(friendlyError(translated))
   }
 
   const lines = translated.split('\n')
@@ -220,6 +246,18 @@ export async function translateLrcDetailed(
       successCount: 0,
       totalCount: texts.length,
       error: '歌词已是中文，无需翻译'
+    }
+  }
+
+  // 翻过的直接给缓存：公共接口额度按 IP 算，同一首歌不该翻第二次
+  const cached = getCachedTranslation(source, target, lrc)
+  if (cached) {
+    return {
+      lrc: cached,
+      translated: true,
+      successCount: texts.length,
+      totalCount: texts.length,
+      cached: true
     }
   }
 
@@ -287,9 +325,13 @@ export async function translateLrcDetailed(
   }
 
   const kept = texts.length - changedCount
+  const finalLrc = rebuildLrc(merged)
+
+  // 只有真的翻出东西才值得缓存，免得把半成品锁死
+  putCachedTranslation(source, target, lrc, finalLrc)
 
   return {
-    lrc: rebuildLrc(merged),
+    lrc: finalLrc,
     translated: true,
     successCount: changedCount,
     totalCount: texts.length,

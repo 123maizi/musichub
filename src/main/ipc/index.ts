@@ -114,6 +114,7 @@ export function registerIpc(ctx: IpcContext): void {
         lineCount: 0,
         totalCount: 0,
         sourceLang: detectSourceLang(main),
+        cached: true,
         error: undefined
       }
     }
@@ -137,6 +138,7 @@ export function registerIpc(ctx: IpcContext): void {
       lineCount: result.successCount,
       totalCount: result.totalCount,
       sourceLang,
+      cached: result.cached,
       error: result.error
     }
   })

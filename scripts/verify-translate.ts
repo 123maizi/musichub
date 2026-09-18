@@ -17,6 +17,11 @@ import {
   translateLrcDetailed,
   translateLyric
 } from '../src/main/core/lyric/translate'
+import {
+  cacheSize,
+  getCachedTranslation,
+  putCachedTranslation
+} from '../src/main/core/lyric/translate-cache'
 import { parseLrc, parseLrcWithTranslation } from '../src/renderer/src/utils/format'
 
 const ENGLISH_LRC = `[ti:Imagine]
@@ -149,5 +154,18 @@ if (!result.translated) {
     if (line.trans) console.log(`      └ ${line.trans}`)
   }
 }
+
+/* ---------------- 6. 缓存（不联网，额度用尽时也能验） ---------------- */
+console.log('\n[6] 翻译缓存：同一首歌不该翻第二次')
+const CACHE_KEY_LRC = "[00:00.00]cache probe only\n[00:03.00]never sent to network"
+console.log(`    写入前查缓存: ${getCachedTranslation('en', 'zh-CN', CACHE_KEY_LRC) ?? 'null（符合预期）'}`)
+putCachedTranslation('en', 'zh-CN', CACHE_KEY_LRC, '[00:00.00]仅缓存探针\n[00:03.00]不会发往网络')
+const hit = getCachedTranslation('en', 'zh-CN', CACHE_KEY_LRC)
+console.log(`    写入后命中  : ${hit ?? 'null（缓存失效！）'}`)
+console.log(`    缓存生效    : ${hit ? '✓' : '✗'}`)
+// 换个语言对必须取不到，否则就是键没区分开
+const wrongLang = getCachedTranslation('ja', 'zh-CN', CACHE_KEY_LRC)
+console.log(`    语言对隔离  : ${wrongLang === null ? '✓' : '✗ 不同语言对取了同一份'}`)
+console.log(`    当前缓存条目: ${cacheSize()}`)
 
 console.log(`\n${'='.repeat(76)}\n`)
