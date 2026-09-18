@@ -62,6 +62,30 @@ async function searchByKeyword(keyword: string): Promise<void> {
   await search.search(kw)
   showToast(`正在搜索：${kw}`)
 }
+
+/* ------------------------------ 批量选择 ------------------------------ */
+
+const selectMode = ref(false)
+const selectedIds = ref<string[]>([])
+
+/** 当前选中且仍在可见结果里的歌曲 */
+const selectedSongs = computed(() =>
+  search.visibleSongs.filter((s) => selectedIds.value.includes(s.id))
+)
+
+function toggleSelectMode(): void {
+  selectMode.value = !selectMode.value
+  if (!selectMode.value) selectedIds.value = []
+}
+
+async function downloadSelected(): Promise<void> {
+  const songs = selectedSongs.value
+  if (songs.length === 0) return
+  await downloads.add(songs)
+  showToast(`已把选中的 ${songs.length} 首加入下载队列`)
+  selectedIds.value = []
+  selectMode.value = false
+}
 </script>
 
 <template>
@@ -109,6 +133,22 @@ async function searchByKeyword(keyword: string): Promise<void> {
         </span>
 
         <button
+          :class="selectMode ? 'primary small' : 'ghost small'"
+          :disabled="search.totalCount === 0"
+          @click="toggleSelectMode"
+        >
+          {{ selectMode ? '退出多选' : '多选' }}
+        </button>
+
+        <template v-if="selectMode">
+          <span class="faint small-text">已选 {{ selectedIds.length }} 首</span>
+          <button class="primary small" :disabled="selectedIds.length === 0" @click="downloadSelected">
+            下载所选
+          </button>
+        </template>
+
+        <button
+          v-else
           class="ghost small"
           :disabled="search.totalCount === 0"
           @click="downloadAll"
@@ -159,9 +199,11 @@ async function searchByKeyword(keyword: string): Promise<void> {
     <!-- 结果表 -->
     <div class="results">
       <SongTable
+        v-model:selected-ids="selectedIds"
         :songs="search.visibleSongs"
         :loading="search.loading"
         :current-id="player.current?.id ?? ''"
+        :selectable="selectMode"
         empty-text="输入关键词开始搜索"
         @play="playSong"
         @queue="queueSong"

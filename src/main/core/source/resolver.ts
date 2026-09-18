@@ -21,6 +21,7 @@ import type {
 } from '@shared/types/music'
 import { APP_CONST, qualityRank } from '@shared/constants'
 import { errorMessage } from '@main/utils/error'
+import { fetchBuiltinLyric } from '../lyric'
 import type { LoadedSource, SourceManager } from './manager'
 import type { StreamProxy } from '../proxy/stream-proxy'
 
@@ -159,7 +160,6 @@ export class MusicResolver {
     const candidates = this.pickCandidates(song, sourceIds).filter((src) =>
       this.supportsAction(src, song.platform, 'lyric')
     )
-    if (candidates.length === 0) return null
 
     for (const src of candidates) {
       const started = Date.now()
@@ -177,6 +177,20 @@ export class MusicResolver {
         this.deps.onLog?.('warn', 'resolver', `歌词获取失败 ${src.info.name}: ${msg}`)
       }
     }
+
+    /**
+     * 音源都拿不到时，退回内置歌词服务。
+     *
+     * 这里纠正了一个错误假设：歌词**不该依赖音源**。
+     * 实测声明支持歌词的音源（酷我那两个）接口早已失效，
+     * 于是「有歌可听」被「音源还愿意给歌词」绑架了 —— 而歌词本是跨平台通用的。
+     */
+    const builtin = await fetchBuiltinLyric(song)
+    if (builtin) {
+      this.deps.onLog?.('info', 'resolver', `歌词取自内置服务: ${song.name}`)
+      return builtin
+    }
+
     return null
   }
 

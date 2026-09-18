@@ -111,9 +111,8 @@ async function openTask(task: DownloadTask): Promise<void> {
 
     <div v-else class="list">
       <div v-for="task in downloads.tasks" :key="task.id" class="task" :class="task.status">
-        <div class="cover" :class="{ empty: !task.song.picUrl }">
-          <img v-if="task.song.picUrl" :src="task.song.picUrl" alt="" />
-          <span v-else class="mono">MH</span>
+        <div class="cover">
+          <CoverImage :src="task.song.picUrl" :icon-size="20" />
         </div>
 
         <div class="info">

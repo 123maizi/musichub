@@ -464,7 +464,11 @@ const neteaseProvider: SearchProvider = {
         albumId: str(album.id) || str(asArr(item.al)[0]?.id),
         // 网易返回的 duration 是毫秒
         duration: Math.round(num(item.duration) / 1000),
-        picUrl: str(album.picUrl) || neteasePicUrl(str(album.picId)),
+        // 老接口把专辑放在 item.album，新接口放在 item.al —— 两个都试，否则封面会一直是空的
+        picUrl:
+          str(album.picUrl) ||
+          str(asObj(asArr(item.al)[0]).picUrl) ||
+          neteasePicUrl(str(album.picId) || str(asArr(item.al)[0]?.picId)),
         raw: {
           songmid: id,
           id,

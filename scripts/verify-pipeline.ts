@@ -138,6 +138,35 @@ for (const song of targets) {
   }
 }
 
+/* ------------------------------ 5. 歌词 ------------------------------ */
+
+console.log(`\n[5] 歌词获取测试`)
+const lyricTarget = targets[0]
+if (lyricTarget) {
+  const lyric = await resolver.getLyric(lyricTarget)
+  if (lyric) {
+    const text = lyric.lyric || lyric.lxlyric || ''
+    console.log(`    ✓ 拿到歌词：主歌词 ${text.length} 字符，来源音源 id=${lyric.sourceId ?? '未知'}`)
+    console.log(`    预览：${text.split('\n').slice(0, 3).join(' / ').slice(0, 100)}`)
+  } else {
+    console.log(`    ✗ 所有音源都没提供歌词`)
+    const capable = sources
+      .list()
+      .filter(
+        (s) =>
+          s.status === 'ready' &&
+          s.capabilities.some(
+            (c) => c.platform === lyricTarget.platform && c.actions.includes('lyric')
+          )
+      )
+    console.log(
+      `    声明支持「${lyricTarget.platform}」歌词的音源：${
+        capable.length > 0 ? capable.map((s) => s.name).join(', ') : '（一个都没有）'
+      }`
+    )
+  }
+}
+
 /* ------------------------------ 汇总 ------------------------------ */
 
 console.log(`\n${'='.repeat(78)}`)

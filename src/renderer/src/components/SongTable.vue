@@ -4,7 +4,7 @@ import { PLATFORM_META, QUALITY_META, qualityRank } from '@shared/constants'
 import { formatTime } from '../utils/format'
 import { useLibraryStore } from '../stores/library'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     songs: Song[]
     loading?: boolean
@@ -15,13 +15,19 @@ withDefaults(
     currentId?: string
     /** 是否允许从当前列表移除（歌单视图用） */
     removable?: boolean
+    /** 是否进入批量选择模式 */
+    selectable?: boolean
+    /** 已选中的歌曲 id（配合 selectable 使用） */
+    selectedIds?: string[]
   }>(),
   {
     loading: false,
     emptyText: '暂无歌曲',
     showPlatform: true,
     currentId: '',
-    removable: false
+    removable: false,
+    selectable: false,
+    selectedIds: () => []
   }
 )
 
@@ -32,7 +38,22 @@ const emit = defineEmits<{
   remove: [song: Song]
   /** 点歌手 / 专辑名时，把关键词抛给上层去搜索 */
   search: [keyword: string]
+  /** 批量选择结果变化 */
+  'update:selectedIds': [ids: string[]]
 }>()
+
+/** 切换某一行的选中状态 */
+function toggleSelect(song: Song): void {
+  const current = props.selectedIds ?? []
+  const next = current.includes(song.id)
+    ? current.filter((id) => id !== song.id)
+    : [...current, song.id]
+  emit('update:selectedIds', next)
+}
+
+function isSelected(song: Song): boolean {
+  return (props.selectedIds ?? []).includes(song.id)
+}
 
 // 收藏状态直接读音乐库，省得往每一层传 props
 const library = useLibraryStore()
@@ -83,9 +104,21 @@ function isLossless(song: Song): boolean {
         v-for="(song, index) in songs"
         :key="song.id"
         class="row"
-        :class="{ 'no-platform': !showPlatform, playing: song.id === currentId }"
+        :class="{
+          'no-platform': !showPlatform,
+          playing: song.id === currentId,
+          selectable,
+          selected: selectable && isSelected(song)
+        }"
         @dblclick="emit('play', song)"
       >
+        <input
+          v-if="selectable"
+          class="row-check"
+          type="checkbox"
+          :checked="isSelected(song)"
+          @click.stop="toggleSelect(song)"
+        />
         <span class="col-index mono">{{ String(index + 1).padStart(2, '0') }}</span>
 
         <div class="col-main">
@@ -208,6 +241,36 @@ function isLossless(song: Song): boolean {
 }
 
 .row.playing .title {
+  color: var(--accent);
+}
+
+/* 批量选择：复选框绝对定位，这样不必为它改动整套栅格列定义 */
+.row.selectable {
+  position: relative;
+}
+
+.row-check {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.row.selectable .col-main {
+  padding-left: 24px;
+}
+
+.row.selected {
+  background: var(--accent-soft);
+}
+
+.row.selected .title {
   color: var(--accent);
 }
 

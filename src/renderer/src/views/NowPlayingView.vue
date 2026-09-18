@@ -2,13 +2,14 @@
 /**
  * 正在播放页
  *
- * 大封面 + 滚动歌词。歌词高亮跟随播放进度，
- * 点某一行可直接跳到那一句 —— 这是听歌时最常用的两个动作。
+ * 大封面 + 滚动歌词。所有图标用内联 SVG（见 AppIcon），
+ * 刻意不用 ⏮ ▶ ⏭ 这类符号 —— 它们在 Windows 上会被渲染成彩色 emoji 方块。
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
+import AppIcon from '../components/AppIcon.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
@@ -21,6 +22,16 @@ const downloads = useDownloadStore()
 
 const lyricBox = ref<HTMLElement | null>(null)
 const toast = ref<string | null>(null)
+const seeking = ref(false)
+const seekValue = ref(0)
+
+/** 播放模式 → 图标名 */
+const MODE_ICON = {
+  order: 'list',
+  loop: 'loop',
+  single: 'single',
+  shuffle: 'shuffle'
+} as const
 
 const platformName = computed(() =>
   player.current ? (PLATFORM_META[player.current.platform]?.name ?? player.current.platform) : ''
@@ -35,7 +46,6 @@ const isFavorite = computed(() =>
   player.current ? library.isFavorite(player.current.id) : false
 )
 
-/** 歌词为空时给一句友好的提示，而不是留一片空白 */
 const hasLyric = computed(() => player.lyricLines.length > 0)
 
 const lyricHint = computed(() => {
@@ -45,11 +55,26 @@ const lyricHint = computed(() => {
   return '这首歌暂时没有歌词'
 })
 
-function notify(message: string): void {
-  toast.value = message
-  setTimeout(() => {
-    if (toast.value === message) toast.value = null
-  }, 2200)
+/* ------------------------------ 进度条 ------------------------------ */
+
+const displayProgress = computed(() =>
+  seeking.value ? seekValue.value : player.progress
+)
+
+const displayTime = computed(() =>
+  seeking.value && player.duration > 0
+    ? (seekValue.value / 100) * player.duration
+    : player.currentTime
+)
+
+function onSeekInput(event: Event): void {
+  seeking.value = true
+  seekValue.value = Number((event.target as HTMLInputElement).value)
+}
+
+function onSeekCommit(event: Event): void {
+  player.seekByPercent(Number((event.target as HTMLInputElement).value))
+  seeking.value = false
 }
 
 /* ------------------------------ 歌词滚动 ------------------------------ */
@@ -70,11 +95,14 @@ watch(
   }
 )
 
-function seekToLine(time: number): void {
-  player.seek(time)
-}
-
 /* ------------------------------ 操作 ------------------------------ */
+
+function notify(message: string): void {
+  toast.value = message
+  setTimeout(() => {
+    if (toast.value === message) toast.value = null
+  }, 2200)
+}
 
 async function toggleFavorite(): Promise<void> {
   const song = player.current
@@ -92,18 +120,19 @@ async function downloadCurrent(): Promise<void> {
 
 function queueCurrent(): void {
   const song = player.current
-  if (song) player.addToQueue(song)
-}
-
-function back(): void {
-  void router.back()
+  if (song) {
+    player.addToQueue(song)
+    notify('已加入播放队列')
+  }
 }
 </script>
 
 <template>
   <section class="view">
     <header class="bar">
-      <button class="ghost small" @click="back">← 返回</button>
+      <button class="icon-btn" title="返回" @click="router.back()">
+        <AppIcon name="back" :size="18" />
+      </button>
       <div class="grow"></div>
       <span v-if="player.urlInfo" class="tag accent" :title="`由音源「${player.urlInfo.sourceName}」提供`">
         {{ qualityLabel }}
@@ -112,11 +141,10 @@ function back(): void {
     </header>
 
     <div class="stage">
-      <!-- 左：封面与曲目信息 -->
+      <!-- 左：封面与控制 -->
       <div class="left">
-        <div class="cover" :class="{ empty: !player.current?.picUrl }">
-          <img v-if="player.current?.picUrl" :src="player.current.picUrl" alt="" />
-          <span v-else class="mono">MH</span>
+        <div class="cover">
+          <CoverImage :src="player.current?.picUrl" :icon-size="56" />
         </div>
 
         <div class="meta">
@@ -130,40 +158,59 @@ function back(): void {
           <div v-if="player.current?.albumName" class="album faint ellipsis">
             {{ player.current.albumName }}
           </div>
+        </div>
 
-          <div class="actions">
-            <button class="ghost small" :class="{ liked: isFavorite }" :disabled="!player.current" @click="toggleFavorite">
-              {{ isFavorite ? '♥ 已收藏' : '♡ 收藏' }}
-            </button>
-            <button class="ghost small" :disabled="!player.current" @click="downloadCurrent">
-              ↓ 下载
-            </button>
-            <button class="ghost small" :disabled="!player.current" @click="queueCurrent">
-              ＋ 加入队列
-            </button>
-          </div>
+        <div class="tools">
+          <button class="tool" :class="{ on: isFavorite }" :disabled="!player.current" @click="toggleFavorite">
+            <AppIcon :name="isFavorite ? 'heart-filled' : 'heart'" :size="15" :filled="isFavorite" />
+            <span>{{ isFavorite ? '已收藏' : '收藏' }}</span>
+          </button>
+          <button class="tool" :disabled="!player.current" @click="downloadCurrent">
+            <AppIcon name="download" :size="15" />
+            <span>下载</span>
+          </button>
+          <button class="tool" :disabled="!player.current" @click="queueCurrent">
+            <AppIcon name="plus" :size="15" />
+            <span>队列</span>
+          </button>
         </div>
 
         <!-- 进度 -->
-        <div class="progress-block">
-          <div class="time-row mono">
-            <span>{{ formatTime(player.currentTime) }}</span>
-            <span class="faint">{{ formatTime(player.duration) }}</span>
-          </div>
-          <div class="bar">
-            <i :style="{ width: `${player.progress}%` }" />
-          </div>
+        <div class="progress-row">
+          <span class="time mono">{{ formatTime(displayTime) }}</span>
+          <input
+            class="seek"
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            :value="displayProgress"
+            :disabled="!player.current || player.duration <= 0"
+            @input="onSeekInput"
+            @change="onSeekCommit"
+          />
+          <span class="time mono faint">{{ formatTime(player.duration) }}</span>
         </div>
 
         <!-- 传输控制 -->
         <div class="controls">
-          <button class="ghost" title="上一首" :disabled="player.playlist.length === 0" @click="player.playPrev()">⏮</button>
-          <button class="play-btn" :title="player.playing ? '暂停' : '播放'" :disabled="!player.current" @click="player.toggle()">
-            {{ player.playing ? '❚❚' : '▶' }}
+          <button class="ctrl" title="上一首" :disabled="player.playlist.length === 0" @click="player.playPrev()">
+            <AppIcon name="prev" :size="22" />
           </button>
-          <button class="ghost" title="下一首" :disabled="player.playlist.length === 0" @click="player.playNext()">⏭</button>
-          <button class="ghost small mode" :title="player.modeLabel" @click="player.cycleMode()">
-            {{ player.modeLabel }}
+          <button
+            class="ctrl main"
+            :title="player.playing ? '暂停' : '播放'"
+            :disabled="!player.current || player.loading"
+            @click="player.toggle()"
+          >
+            <AppIcon :name="player.playing ? 'pause' : 'play'" :size="24" />
+          </button>
+          <button class="ctrl" title="下一首" :disabled="player.playlist.length === 0" @click="player.playNext()">
+            <AppIcon name="next" :size="22" />
+          </button>
+          <button class="mode-btn" :title="player.modeLabel" @click="player.cycleMode()">
+            <AppIcon :name="MODE_ICON[player.mode]" :size="15" />
+            <span>{{ player.modeLabel }}</span>
           </button>
         </div>
       </div>
@@ -171,8 +218,8 @@ function back(): void {
       <!-- 右：歌词 -->
       <div class="right">
         <div v-if="!hasLyric" class="lyric-empty">
+          <AppIcon name="music" :size="26" />
           <span>{{ lyricHint }}</span>
-          <span v-if="player.lyricRaw?.tlyric" class="faint">（有翻译歌词可用）</span>
         </div>
 
         <div v-else ref="lyricBox" class="lyric-box">
@@ -183,7 +230,7 @@ function back(): void {
             class="lyric-line"
             :class="{ active: index === player.currentLyricIndex }"
             :data-line="index"
-            @click="seekToLine(line.time)"
+            @click="player.seek(line.time)"
           >
             {{ line.text || '·' }}
           </div>
@@ -212,53 +259,76 @@ function back(): void {
   position: relative;
 }
 
+/* ------------------------------ 顶栏 ------------------------------ */
+
 .bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 18px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--line-soft);
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.src-name {
+  max-width: 150px;
+  font-size: 11.5px;
 }
 
 .small {
   font-size: 12px;
 }
 
-.src-name {
-  max-width: 140px;
-  font-size: 11.5px;
-}
-
-/* ------------------------------ 主体 ------------------------------ */
+/* ------------------------------ 布局 ------------------------------ */
 
 .stage {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 380px) 1fr;
-  gap: 32px;
-  padding: 28px 32px;
+  grid-template-columns: minmax(300px, 400px) 1fr;
+  gap: 40px;
+  padding: 30px 36px;
   overflow: hidden;
 }
 
 .left {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
   min-height: 0;
   overflow-y: auto;
 }
 
+/* ------------------------------ 封面 ------------------------------ */
+
 .cover {
   width: 100%;
   aspect-ratio: 1;
-  border-radius: var(--radius);
+  border-radius: 14px;
   overflow: hidden;
   background: var(--bg-elev);
   border: 1px solid var(--line);
   display: grid;
   place-items: center;
+  color: var(--text-faint);
   flex: none;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
 }
 
 .cover img {
@@ -267,20 +337,16 @@ function back(): void {
   object-fit: cover;
 }
 
-.cover.empty .mono {
-  font-size: 26px;
-  color: var(--text-faint);
-  letter-spacing: 0.1em;
-}
+/* ------------------------------ 曲目信息 ------------------------------ */
 
 .meta {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 
 .meta h1 {
-  font-size: 20px;
+  font-size: 21px;
   font-weight: 600;
   line-height: 1.35;
 }
@@ -294,67 +360,151 @@ function back(): void {
   font-size: 12px;
 }
 
-.actions {
+/* ------------------------------ 工具胶囊 ------------------------------ */
+
+.tools {
   display: flex;
+  gap: 8px;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
-
-.liked {
-  color: var(--accent);
-}
-
-/* ------------------------------ 进度与控制 ------------------------------ */
-
-.progress-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.time-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11.5px;
+  padding: 7px 13px;
+  font-size: 12.5px;
+  border-radius: 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
   color: var(--text-dim);
 }
 
-.progress-block .bar {
-  height: 4px;
+.tool:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
 }
+
+.tool.on {
+  color: var(--accent);
+  border-color: rgba(212, 162, 76, 0.35);
+  background: var(--accent-soft);
+}
+
+/* ------------------------------ 进度 ------------------------------ */
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.time {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  min-width: 42px;
+  text-align: center;
+}
+
+.seek {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.seek::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(212, 162, 76, 0.15);
+}
+
+.seek:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ------------------------------ 控制按钮 ------------------------------ */
 
 .controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
+  margin-top: 2px;
 }
 
-.controls .ghost {
-  font-size: 15px;
-  padding: 6px 10px;
-}
-
-.play-btn {
-  width: 44px;
-  height: 44px;
+.ctrl {
+  width: 46px;
+  height: 46px;
+  padding: 0;
   border-radius: 50%;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #1a1408;
-  font-size: 14px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
   display: grid;
   place-items: center;
-  padding: 0;
+  transition: background 0.14s, color 0.14s, transform 0.1s;
 }
 
-.play-btn:hover:not(:disabled) {
+.ctrl:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.ctrl:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.ctrl.main {
+  width: 60px;
+  height: 60px;
+  background: var(--accent);
+  color: #1a1408;
+  box-shadow: 0 6px 20px rgba(212, 162, 76, 0.28);
+}
+
+.ctrl.main:hover:not(:disabled) {
   background: #e0b05c;
-  border-color: #e0b05c;
+  color: #1a1408;
 }
 
-.mode {
+.ctrl:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin-left: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 16px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+
+.mode-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 /* ------------------------------ 歌词 ------------------------------ */
@@ -363,6 +513,7 @@ function back(): void {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  justify-content: center;
 }
 
 .lyric-box {
@@ -370,8 +521,8 @@ function back(): void {
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: none;
-  mask-image: linear-gradient(180deg, transparent, #000 12%, #000 88%, transparent);
-  -webkit-mask-image: linear-gradient(180deg, transparent, #000 12%, #000 88%, transparent);
+  mask-image: linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent);
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent);
 }
 
 .lyric-box::-webkit-scrollbar {
@@ -379,12 +530,12 @@ function back(): void {
 }
 
 .lyric-pad {
-  height: 40%;
+  height: 42%;
 }
 
 .lyric-line {
-  padding: 9px 8px;
-  font-size: 15px;
+  padding: 10px 10px;
+  font-size: 15.5px;
   line-height: 1.6;
   color: var(--text-faint);
   cursor: pointer;
@@ -399,16 +550,17 @@ function back(): void {
 
 .lyric-line.active {
   color: var(--accent);
+  font-size: 17px;
   font-weight: 600;
 }
 
 .lyric-empty {
-  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 14px;
+  height: 100%;
   color: var(--text-faint);
   font-size: 13px;
 }
@@ -420,7 +572,7 @@ function back(): void {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 18px;
+  padding: 8px 20px;
   background: rgba(212, 87, 76, 0.1);
   border-top: 1px solid rgba(212, 87, 76, 0.35);
   font-size: 12px;
@@ -429,7 +581,7 @@ function back(): void {
 
 .toast {
   position: absolute;
-  bottom: 20px;
+  bottom: 22px;
   left: 50%;
   transform: translateX(-50%);
   padding: 8px 18px;

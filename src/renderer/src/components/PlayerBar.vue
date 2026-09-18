@@ -1,25 +1,27 @@
 <script setup lang="ts">
+/**
+ * 底部播放条
+ * 图标全部走 AppIcon（内联 SVG），不再使用 ⏮ ▶ ⏭ 这类符号。
+ */
 import { computed, ref } from 'vue'
-import { usePlayerStore } from '../stores/player'
+import { PLATFORM_META, QUALITY_META } from '@shared/constants'
+import AppIcon from './AppIcon.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
-import { PLATFORM_META, QUALITY_META } from '@shared/constants'
+import { usePlayerStore } from '../stores/player'
 import { formatTime } from '../utils/format'
 
 const player = usePlayerStore()
 const downloads = useDownloadStore()
 const library = useLibraryStore()
 
-/** 当前歌曲是否已收藏（播放条上的心形） */
-const isCurrentFavorite = computed(() =>
-  player.current ? library.isFavorite(player.current.id) : false
-)
-
-async function toggleFavorite(): Promise<void> {
-  const song = player.current
-  if (!song) return
-  await library.toggleFavorite(song)
-}
+/** 播放模式 → 图标名 */
+const MODE_ICON = {
+  order: 'list',
+  loop: 'loop',
+  single: 'single',
+  shuffle: 'shuffle'
+} as const
 
 const seeking = ref(false)
 const seekValue = ref(0)
@@ -33,35 +35,37 @@ const qualityLabel = computed(() => {
   return QUALITY_META[q]?.short ?? String(q)
 })
 
+const isCurrentFavorite = computed(() =>
+  player.current ? library.isFavorite(player.current.id) : false
+)
+
 /** 拖动进度条时先用本地值预览，松手才真正 seek */
+const displayProgress = computed(() => (seeking.value ? seekValue.value : player.progress))
+
 function onSeekInput(event: Event): void {
   seeking.value = true
   seekValue.value = Number((event.target as HTMLInputElement).value)
 }
 
 function onSeekCommit(event: Event): void {
-  const value = Number((event.target as HTMLInputElement).value)
-  player.seekByPercent(value)
+  player.seekByPercent(Number((event.target as HTMLInputElement).value))
   seeking.value = false
 }
-
-const displayProgress = computed(() =>
-  seeking.value ? seekValue.value : player.progress
-)
-
-const displayTime = computed(() =>
-  seeking.value && player.duration > 0
-    ? formatTime((seekValue.value / 100) * player.duration)
-    : formatTime(player.currentTime)
-)
 
 function onVolume(event: Event): void {
   player.setVolume(Number((event.target as HTMLInputElement).value) / 100)
 }
 
+async function toggleFavorite(): Promise<void> {
+  const song = player.current
+  if (!song) return
+  await library.toggleFavorite(song)
+}
+
 async function downloadCurrent(): Promise<void> {
-  if (!player.current) return
-  await downloads.add([player.current], { quality: player.quality })
+  const song = player.current
+  if (!song) return
+  await downloads.add([song], { quality: player.quality })
 }
 </script>
 
@@ -83,16 +87,15 @@ async function downloadCurrent(): Promise<void> {
     </div>
 
     <div class="bar-body">
-      <!-- 左：当前曲目（点击进入正在播放页，看大图与歌词） -->
+      <!-- 左：当前曲目（点击进入正在播放页） -->
       <router-link
         class="now"
         to="/now-playing"
         title="查看大图与歌词"
         style="text-decoration: none; color: inherit"
       >
-        <div class="cover" :class="{ empty: !player.current?.picUrl }">
-          <img v-if="player.current?.picUrl" :src="player.current.picUrl" alt="" />
-          <span v-else class="mono">MH</span>
+        <div class="cover">
+          <CoverImage :src="player.current?.picUrl" :icon-size="20" />
         </div>
 
         <div class="now-text">
@@ -113,35 +116,42 @@ async function downloadCurrent(): Promise<void> {
       <!-- 中：传输控制 -->
       <div class="controls">
         <div class="buttons">
-          <button class="ghost" title="上一首" :disabled="player.playlist.length === 0" @click="player.playPrev()">
-            ⏮
-          </button>
           <button
-            class="play-btn"
-            :disabled="!player.current || player.loading"
+            class="ctrl"
+            title="上一首"
+            :disabled="player.playlist.length === 0"
+            @click="player.playPrev()"
+          >
+            <AppIcon name="prev" :size="18" />
+          </button>
+
+          <button
+            class="ctrl main"
             :title="player.playing ? '暂停' : '播放'"
+            :disabled="!player.current || player.loading"
             @click="player.toggle()"
           >
-            <span v-if="player.loading" class="mono">…</span>
-            <span v-else>{{ player.playing ? '❚❚' : '▶' }}</span>
+            <AppIcon :name="player.playing ? 'pause' : 'play'" :size="18" />
           </button>
-          <button class="ghost" title="下一首" :disabled="player.playlist.length === 0" @click="player.playNext()">
-            ⏭
+
+          <button
+            class="ctrl"
+            title="下一首"
+            :disabled="player.playlist.length === 0"
+            @click="player.playNext()"
+          >
+            <AppIcon name="next" :size="18" />
           </button>
         </div>
 
         <div class="time-row mono">
-          <span>{{ displayTime }}</span>
+          <span>{{ formatTime(player.currentTime) }}</span>
           <span class="faint">/ {{ formatTime(player.duration) }}</span>
         </div>
       </div>
 
-      <!-- 右：音质 / 模式 / 音量 / 下载 -->
+      <!-- 右：音质 / 模式 / 收藏 / 下载 / 音量 -->
       <div class="tools">
-        <button class="ghost small" :title="player.modeLabel" @click="player.cycleMode()">
-          {{ player.modeLabel }}
-        </button>
-
         <span v-if="player.urlInfo" class="tag accent" :title="`由音源「${player.urlInfo.sourceName}」提供`">
           {{ qualityLabel }}
         </span>
@@ -149,23 +159,22 @@ async function downloadCurrent(): Promise<void> {
           {{ player.urlInfo.sourceName }}
         </span>
 
+        <button class="icon-btn" :title="player.modeLabel" @click="player.cycleMode()">
+          <AppIcon :name="MODE_ICON[player.mode]" :size="16" />
+        </button>
+
         <button
-          class="ghost small"
-          :class="{ liked: isCurrentFavorite }"
+          class="icon-btn"
+          :class="{ on: isCurrentFavorite }"
           :disabled="!player.current"
           :title="isCurrentFavorite ? '取消收藏' : '收藏到我的喜欢'"
           @click="toggleFavorite"
         >
-          {{ isCurrentFavorite ? '♥' : '♡' }}
+          <AppIcon :name="isCurrentFavorite ? 'heart-filled' : 'heart'" :size="16" :filled="isCurrentFavorite" />
         </button>
 
-        <button
-          class="ghost small"
-          :disabled="!player.current"
-          title="下载当前歌曲"
-          @click="downloadCurrent"
-        >
-          下载
+        <button class="icon-btn" :disabled="!player.current" title="下载当前歌曲" @click="downloadCurrent">
+          <AppIcon name="download" :size="16" />
         </button>
 
         <input
@@ -228,9 +237,9 @@ async function downloadCurrent(): Promise<void> {
 .progress-input::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 10px;
-  height: 10px;
-  margin-top: -3.5px;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
   border-radius: 50%;
   background: var(--accent);
   opacity: 0;
@@ -262,29 +271,26 @@ async function downloadCurrent(): Promise<void> {
   align-items: center;
   gap: 12px;
   min-width: 0;
+  cursor: pointer;
 }
 
 .cover {
   flex: none;
   width: 46px;
   height: 46px;
-  border-radius: 8px;
+  border-radius: 9px;
   overflow: hidden;
   background: var(--bg-elev);
   border: 1px solid var(--line);
   display: grid;
   place-items: center;
+  color: var(--text-faint);
 }
 
 .cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.cover.empty .mono {
-  font-size: 11px;
-  color: var(--text-faint);
 }
 
 .now-text {
@@ -314,30 +320,46 @@ async function downloadCurrent(): Promise<void> {
 .buttons {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
-.buttons .ghost {
-  font-size: 13px;
-  padding: 4px 8px;
-}
-
-.play-btn {
-  width: 36px;
-  height: 36px;
+.ctrl {
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border-radius: 50%;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #1a1408;
-  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
   display: grid;
   place-items: center;
-  padding: 0;
+  transition: background 0.14s, color 0.14s, transform 0.1s;
 }
 
-.play-btn:hover:not(:disabled) {
+.ctrl:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.ctrl:active:not(:disabled) {
+  transform: scale(0.93);
+}
+
+.ctrl.main {
+  width: 40px;
+  height: 40px;
+  background: var(--accent);
+  color: #1a1408;
+}
+
+.ctrl.main:hover:not(:disabled) {
   background: #e0b05c;
-  border-color: #e0b05c;
+  color: #1a1408;
+}
+
+.ctrl:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .time-row {
@@ -352,22 +374,38 @@ async function downloadCurrent(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
-.small {
-  font-size: 12px;
-  padding: 4px 9px;
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  display: grid;
+  place-items: center;
 }
 
-/* 已收藏：心形点亮 */
-.liked {
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.icon-btn.on {
   color: var(--accent);
 }
 
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .src-name {
-  max-width: 120px;
+  max-width: 110px;
   font-size: 11px;
   color: var(--text-faint);
 }
@@ -415,5 +453,9 @@ async function downloadCurrent(): Promise<void> {
   border-top: 1px solid rgba(212, 87, 76, 0.35);
   font-size: 12px;
   color: #e79a92;
+}
+
+.small {
+  font-size: 12px;
 }
 </style>
