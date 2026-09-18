@@ -36,6 +36,32 @@ for (const provider of builtinProviders) {
     if (res.songs.length === 0) {
       console.log('     (无结果)')
     }
+
+    // 封面可达性实测：光有地址没用，还得真能取到图
+    const withPic = res.songs.filter((s) => s.picUrl)
+    console.log(`     ── 封面：${withPic.length}/${res.songs.length} 首有地址`)
+    if (withPic.length > 0) {
+      const sizes: number[] = []
+      const types: string[] = []
+      for (const song of withPic.slice(0, 3)) {
+        try {
+          const response = await fetch(song.picUrl as string, {
+            signal: AbortSignal.timeout(8000)
+          })
+          const bytes = Buffer.from(await response.arrayBuffer())
+          sizes.push(bytes.length)
+          types.push(response.headers.get('content-type') ?? '?')
+        } catch {
+          sizes.push(-1)
+        }
+      }
+      console.log(`        实测字节数: ${sizes.map((v) => (v < 0 ? '失败' : v)).join(', ')}`)
+      console.log(`        内容类型: ${types.join(', ')}`)
+      // 多首封面字节数完全相同 = 大概率是同一张占位图，而不是各自专辑的真实封面
+      if (sizes.length > 1 && sizes[0] > 0 && sizes.every((v) => v === sizes[0])) {
+        console.log('        ⚠ 多首封面大小完全相同 —— 疑似通用占位图')
+      }
+    }
   } catch (err) {
     console.log(`\n[${provider.platform.padEnd(2)}] ${provider.name}  →  失败`)
     console.log(`     ${err instanceof Error ? err.message : String(err)}`)

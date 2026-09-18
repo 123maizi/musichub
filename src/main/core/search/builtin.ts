@@ -292,7 +292,9 @@ const kugouProvider: SearchProvider = {
         albumName: str(item.album_name),
         albumId,
         duration: num(item.duration),
-        picUrl: albumId ? `https://imge.kugou.com/stdmusic/240/${albumId}.jpg` : undefined,
+        // 酷狗那套 stdmusic 地址对任何专辑都返回同一张占位图（实测 5 首全是 17853 字节），
+        // 与其给用户看假图，不如留空，交给封面补全服务去别处找真实的
+        picUrl: undefined,
         raw: {
           hash,
           sqhash: str(item.sqhash),

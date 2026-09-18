@@ -95,7 +95,12 @@ async function downloadCurrent(): Promise<void> {
         style="text-decoration: none; color: inherit"
       >
         <div class="cover">
-          <CoverImage :src="player.current?.picUrl" :icon-size="20" />
+          <CoverImage
+            :src="player.current?.picUrl"
+            :song="player.current ?? undefined"
+            :icon-size="20"
+            fallback
+          />
         </div>
 
         <div class="now-text">

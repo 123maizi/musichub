@@ -27,6 +27,8 @@ export const CH = {
   playProbe: 'play:probe',
   /** 上报某音源在某平台上质量不合格（如只给试听片段） */
   playReportBadSource: 'play:reportBadSource',
+  /** 封面补全：平台没给封面时，按歌名+歌手去别处找一张 */
+  coverResolve: 'cover:resolve',
   // 下载
   downloadAdd: 'download:add',
   downloadList: 'download:list',

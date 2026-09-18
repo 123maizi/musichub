@@ -16,6 +16,7 @@ import type { MusicResolver } from '@main/core/source/resolver'
 import type { DownloadManager } from '@main/core/download/manager'
 import type { StreamProxy } from '@main/core/proxy/stream-proxy'
 import { probeUrl } from '@main/core/net/http'
+import { resolveCover } from '@main/core/cover'
 
 // 通道名唯一定义源在 shared 层，这里引入并原样再导出给外部引用
 import { CH, EV } from '@shared/ipc-channels'
@@ -99,6 +100,9 @@ export function registerIpc(ctx: IpcContext): void {
       resolver.reportBadSource(sourceId, song, reason)
     }
   )
+
+  // 封面补全：平台没给封面时，按「歌名 + 歌手」去封面质量更稳的平台找一张
+  ipcMain.handle(CH.coverResolve, (_e, song: Song) => resolveCover(song))
 
   /* ------------------------------ 下载 ------------------------------ */
 

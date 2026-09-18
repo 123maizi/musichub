@@ -68,7 +68,9 @@ const api = {
      * 主进程会冷却该音源并清掉这首歌的取流缓存，让下次请求自动换源。
      */
     reportBadSource: (sourceId: string, song: Song, reason?: string) =>
-      invoke(CH.playReportBadSource, sourceId, song, reason)
+      invoke(CH.playReportBadSource, sourceId, song, reason),
+    /** 封面补全：平台没给封面时，按「歌名 + 歌手」去别处找一张 */
+    resolveCover: (song: Song) => invoke(CH.coverResolve, song)
   },
 
   /* ------------------------------ 下载 ------------------------------ */

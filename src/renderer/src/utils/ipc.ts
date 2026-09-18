@@ -50,3 +50,12 @@ export function addDownload(req: DownloadAddRequest): Promise<DownloadTask[]> {
 export function reportBadSource(sourceId: string, song: Song, reason?: string): Promise<void> {
   return window.api.player.reportBadSource(sourceId, toPlain(song), reason)
 }
+
+/**
+ * 补全封面。
+ * 平台没给封面（酷我大多没有）或给的是占位图（酷狗）时，
+ * 用「歌名 + 歌手」去封面质量更稳的平台找一张。
+ */
+export function resolveCover(song: Song): Promise<string | null> {
+  return window.api.player.resolveCover(toPlain(song))
+}

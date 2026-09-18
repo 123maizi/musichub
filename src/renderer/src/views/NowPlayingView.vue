@@ -144,7 +144,12 @@ function queueCurrent(): void {
       <!-- 左：封面与控制 -->
       <div class="left">
         <div class="cover">
-          <CoverImage :src="player.current?.picUrl" :icon-size="56" />
+          <CoverImage
+            :src="player.current?.picUrl"
+            :song="player.current ?? undefined"
+            :icon-size="56"
+            fallback
+          />
         </div>
 
         <div class="meta">
