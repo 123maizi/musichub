@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import type { Song } from '@shared/types/music'
 import SongTable from '../components/SongTable.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
+import { useSearchStore } from '../stores/search'
 
+const router = useRouter()
 const library = useLibraryStore()
 const player = usePlayerStore()
 const downloads = useDownloadStore()
+const searchStore = useSearchStore()
+
+/** 点歌手 / 专辑名 → 跳到搜索页并直接搜它 */
+async function searchByKeyword(keyword: string): Promise<void> {
+  const kw = keyword.trim()
+  if (!kw) return
+  searchStore.keyword = kw
+  await router.push('/search')
+  await searchStore.search(kw)
+}
 
 type Tab = 'favorites' | 'history' | 'playlists'
 
@@ -224,6 +237,7 @@ async function clearCurrentPlaylist(): Promise<void> {
           @queue="queueSong"
           @download="downloadSong"
           @remove="removeFromPlaylist"
+          @search="searchByKeyword"
         />
 
         <!-- 歌单视图下额外提供「从歌单移除」 -->

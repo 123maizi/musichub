@@ -30,6 +30,8 @@ const emit = defineEmits<{
   download: [song: Song]
   queue: [song: Song]
   remove: [song: Song]
+  /** 点歌手 / 专辑名时，把关键词抛给上层去搜索 */
+  search: [keyword: string]
 }>()
 
 // 收藏状态直接读音乐库，省得往每一层传 props
@@ -88,14 +90,25 @@ function isLossless(song: Song): boolean {
 
         <div class="col-main">
           <div class="title ellipsis" :title="song.name">{{ song.name }}</div>
-          <div class="singer ellipsis" :title="song.singer">{{ song.singer }}</div>
+          <div
+            class="singer ellipsis clickable"
+            :title="`搜索歌手：${song.singer}`"
+            @click.stop="emit('search', song.singer)"
+          >
+            {{ song.singer }}
+          </div>
         </div>
 
         <span v-if="showPlatform" class="col-platform">
           <span class="tag">{{ PLATFORM_META[song.platform]?.short ?? song.platform }}</span>
         </span>
 
-        <span class="col-album ellipsis faint" :title="song.albumName">
+        <span
+          class="col-album ellipsis faint"
+          :class="{ clickable: !!song.albumName }"
+          :title="song.albumName ? `搜索专辑：${song.albumName}` : ''"
+          @click.stop="song.albumName && emit('search', song.albumName)"
+        >
           {{ song.albumName || '—' }}
         </span>
 
@@ -216,6 +229,17 @@ function isLossless(song: Song): boolean {
 .singer {
   font-size: 11.5px;
   color: var(--text-dim);
+}
+
+/* 歌手 / 专辑名可点：点一下就去搜它 */
+.clickable {
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.clickable:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .col-album {

@@ -83,8 +83,13 @@ async function downloadCurrent(): Promise<void> {
     </div>
 
     <div class="bar-body">
-      <!-- 左：当前曲目 -->
-      <div class="now">
+      <!-- 左：当前曲目（点击进入正在播放页，看大图与歌词） -->
+      <router-link
+        class="now"
+        to="/now-playing"
+        title="查看大图与歌词"
+        style="text-decoration: none; color: inherit"
+      >
         <div class="cover" :class="{ empty: !player.current?.picUrl }">
           <img v-if="player.current?.picUrl" :src="player.current.picUrl" alt="" />
           <span v-else class="mono">MH</span>
@@ -103,7 +108,7 @@ async function downloadCurrent(): Promise<void> {
             <div class="now-sub faint">在搜索页点一首歌开始</div>
           </template>
         </div>
-      </div>
+      </router-link>
 
       <!-- 中：传输控制 -->
       <div class="controls">

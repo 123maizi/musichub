@@ -52,6 +52,16 @@ async function downloadAll(): Promise<void> {
   await downloads.add(songs)
   showToast(`已把 ${songs.length} 首加入下载队列`)
 }
+
+/** 点歌手 / 专辑名 → 直接以它为新关键词再搜一次 */
+async function searchByKeyword(keyword: string): Promise<void> {
+  const kw = keyword.trim()
+  if (!kw) return
+  search.keyword = kw
+  inputEl.value?.blur()
+  await search.search(kw)
+  showToast(`正在搜索：${kw}`)
+}
 </script>
 
 <template>
@@ -156,6 +166,7 @@ async function downloadAll(): Promise<void> {
         @play="playSong"
         @queue="queueSong"
         @download="downloadSong"
+        @search="searchByKeyword"
       />
     </div>
 
