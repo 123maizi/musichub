@@ -122,13 +122,18 @@ function isLossless(song: Song): boolean {
         <span class="col-index mono">{{ String(index + 1).padStart(2, '0') }}</span>
 
         <div class="col-main">
-          <div class="title ellipsis" :title="song.name">{{ song.name }}</div>
-          <div
-            class="singer ellipsis clickable"
-            :title="`搜索歌手：${song.singer}`"
-            @click.stop="emit('search', song.singer)"
-          >
-            {{ song.singer }}
+          <div class="mini-cover">
+            <CoverImage :src="song.picUrl" :song="song" :icon-size="14" fallback />
+          </div>
+          <div class="title-text">
+            <div class="title ellipsis" :title="song.name">{{ song.name }}</div>
+            <div
+              class="singer ellipsis clickable"
+              :title="`搜索歌手：${song.singer}`"
+              @click.stop="emit('search', song.singer)"
+            >
+              {{ song.singer }}
+            </div>
           </div>
         </div>
 
@@ -280,8 +285,29 @@ function isLossless(song: Song): boolean {
 }
 
 .col-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
   line-height: 1.35;
+}
+
+/* 列表里的小封面：缺图时由 CoverImage 退化成图标，不会出现裂图 */
+.mini-cover {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+}
+
+.title-text {
+  min-width: 0;
 }
 
 .title {

@@ -16,7 +16,8 @@
 import { computed, ref, watch } from 'vue'
 import type { Song } from '@shared/types/music'
 import AppIcon from './AppIcon.vue'
-import { resolveCover } from '../utils/ipc'
+// 用带并发限流的版本：列表里几十首歌同时补图会把接口打爆
+import { resolveCoverThrottled as resolveCover } from '../utils/cover'
 
 const props = withDefaults(
   defineProps<{

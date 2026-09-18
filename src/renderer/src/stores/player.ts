@@ -105,6 +105,13 @@ export const usePlayerStore = defineStore('player', () => {
     // 歌曲本身很短、或平台没给时长时不做判断，避免误杀
     if (!expected || expected < 45) return
 
+    /**
+     * 真正的试听片段通常也有几十秒（实测那条是 47.9 秒）。
+     * 秒级的时长多半是流还没就绪时上报的临时值 ——
+     * 这种时候换源，只会把一个正常音源误判成坏的，还会让歌突然跳走。
+     */
+    if (actual < 15) return
+
     // 差距在 25% 以内视为正常：不同音源的版本确实可能略有长短
     if (actual >= expected * 0.75) {
       fragmentAttempts.value = 0
@@ -173,21 +180,32 @@ export const usePlayerStore = defineStore('player', () => {
       playing.value = false
     })
     el.addEventListener('ended', () => {
-      /**
-       * 防御：正常播完应该停在接近结尾的位置。
-       *
-       * 明显提前触发，说明音频流被异常中断（典型原因是音源只给了试听片段，
-       * 或者流被中途掐断）。这时自动切下一首，在用户看来就是
-       * 「莫名其妙自己跳歌」—— 与其莫名其妙地跳，不如停下来把原因讲清楚。
-       */
       const total = el.duration
       const played = el.currentTime
-      if (Number.isFinite(total) && total > 2 && played < total - 2) {
-        error.value = '音频流提前中断，该音源可能只提供试听片段'
+
+      /**
+       * 判断这次 ended 是不是「真的播完了」。
+       *
+       * 正常播完：时长合理（≥15 秒）且位置停在接近结尾处。
+       *
+       * 落到 else 的常见情况有两种，都绝不能自动切歌：
+       *   1. 音频流被掐断 —— 位置离结尾还差得远
+       *   2. 时长本身异常 —— 比如流还没就绪就报了个 1 秒
+       * 上一版就是漏了第 2 种：1 秒的流播完立刻 ended，
+       * 条件判定不成立于是走到切歌分支，用户看到的就是「播一秒自己跳了」。
+       */
+      const looksComplete = Number.isFinite(total) && total >= 15 && played >= total - 3
+
+      if (!looksComplete) {
         playing.value = false
-        void verifyDuration()
+        error.value = '音频流异常中断，已停止自动切歌'
+        // 只有「时长够长、却远没播完」才能判定为试听片段源
+        if (Number.isFinite(total) && total >= 15 && played < total - 3) {
+          void verifyDuration()
+        }
         return
       }
+
       void handleEnded()
     })
     el.addEventListener('error', () => {
