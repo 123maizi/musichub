@@ -1,0 +1,56 @@
+## electron-builder 打包配置
+## 注意 extraResources：内置音源必须随安装包分发到 resources/sources，
+## 主进程会从 process.resourcesPath/sources 读取（见 src/main/index.ts）。
+appId: com.musichub.app
+productName: MusicHub
+copyright: MusicHub
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+  - '!node_modules/**/{test,__tests__,docs,example,examples}/**'
+
+extraResources:
+  - from: resources/sources
+    to: sources
+    filter:
+      - '**/*.js'
+
+asarUnpack:
+  - resources/**
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MusicHub
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  category: public.app-category.music
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Audio
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}

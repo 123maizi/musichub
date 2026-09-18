@@ -1,0 +1,46 @@
+/**
+ * 搜索映射端到端验证
+ * 直接跑真实的 Provider 代码，打印归一化后的 Song，确认字段映射正确。
+ *
+ * 运行方式（见 package.json scripts.verify:search）：
+ *   esbuild 打包后交给 node 执行，保证验证的是真实代码路径而不是复刻逻辑。
+ */
+import { builtinProviders } from '../src/main/core/search/builtin'
+
+const keyword = process.argv[2] ?? '周杰伦'
+
+console.log(`\n搜索关键词: ${keyword}\n${'='.repeat(76)}`)
+
+let totalSongs = 0
+let okPlatforms = 0
+
+for (const provider of builtinProviders) {
+  const started = Date.now()
+  try {
+    const res = await provider.search(keyword, 1, 5)
+    const cost = Date.now() - started
+    if (res.songs.length > 0) okPlatforms += 1
+    totalSongs += res.songs.length
+
+    console.log(
+      `\n[${provider.platform.padEnd(2)}] ${provider.name}  →  ${res.songs.length} 条 / ${cost}ms`
+    )
+
+    for (const s of res.songs.slice(0, 3)) {
+      console.log(`     ${s.name}  ——  ${s.singer}`)
+      console.log(
+        `        album=${s.albumName || '(空)'} | mid=${s.songmid} | ${s.duration}s | hash=${s.hash ?? '-'}`
+      )
+      console.log(`        pic=${s.picUrl ?? '(无)'}`)
+    }
+    if (res.songs.length === 0) {
+      console.log('     (无结果)')
+    }
+  } catch (err) {
+    console.log(`\n[${provider.platform.padEnd(2)}] ${provider.name}  →  失败`)
+    console.log(`     ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+console.log(`\n${'='.repeat(76)}`)
+console.log(`汇总: ${okPlatforms}/${builtinProviders.length} 个平台可用，共 ${totalSongs} 条结果`)

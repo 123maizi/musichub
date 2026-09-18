@@ -1,0 +1,44 @@
+{
+  "name": "musichub",
+  "version": "0.1.0",
+  "description": "MusicHub - 多音源音乐聚合播放与下载器",
+  "main": "./out/main/index.js",
+  "author": "MusicHub",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:watch": "electron-vite dev --watch",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "verify:search": "esbuild scripts/verify-search.ts --bundle --format=esm --platform=node --outfile=.tmp/verify-search.mjs --alias:@shared=./src/shared --log-level=warning && node .tmp/verify-search.mjs",
+    "build:win": "npm run build && electron-builder --win",
+    "build:mac": "npm run build && electron-builder --mac",
+    "build:linux": "npm run build && electron-builder --linux"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/utils": "^3.0.0"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@types/node": "^22.7.5",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "pinia": "^2.2.6",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vue": "^3.5.13",
+    "vue-router": "^4.4.5",
+    "vue-tsc": "^2.1.10"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.21.5": true,
+    "vue-demi@0.14.10": true
+  }
+}
