@@ -19,30 +19,29 @@ import SongTable from '../components/SongTable.vue'
 import { useArtistStore } from '../stores/artist'
 import { useDownloadStore } from '../stores/downloads'
 import { usePlayerStore } from '../stores/player'
-import { useSearchStore } from '../stores/search'
 import { cleanIpcError } from '../utils/format'
 
 const router = useRouter()
 const artistStore = useArtistStore()
 const player = usePlayerStore()
 const downloads = useDownloadStore()
-const searchStore = useSearchStore()
 
 /**
- * 点歌手名时的行为。
- * 列表里可能混着合唱曲，点到的未必是当前这位艺人 —— 是别人就跳去搜他。
+ * 点歌手名时的行为：直接打开那位艺人的主页。
+ *
+ * 列表里可能混着合唱曲，点到的未必是当前这位 —— 是别人就切过去。
+ * 这里不跳路由，因为本来就在艺人页：selected 一变，
+ * 下面的 watch 会自动重新加载他的歌曲。
  */
-async function searchThisArtist(keyword: string): Promise<void> {
-  const kw = keyword.trim()
+async function searchThisArtist(name: string): Promise<void> {
+  const kw = name.trim()
   if (!kw) return
   if (kw === artistStore.selected?.name) {
     notify(`当前就是「${kw}」`)
     return
   }
-  searchStore.keyword = kw
-  notify(`正在搜索：${kw}`)
-  await router.push('/search')
-  await searchStore.search(kw)
+  notify(`正在打开「${kw}」的主页…`)
+  await artistStore.openByName(kw)
 }
 
 const songs = ref<Song[]>([])
@@ -74,6 +73,67 @@ function notify(message: string): void {
   }, 2400)
 }
 
+/* ------------------------------ 魔改版本过滤 ------------------------------ */
+
+/**
+ * 魔改版本特征词。
+ *
+ * 搜「周杰伦」会涌出大量 DJ 版、伴奏版、串烧 —— 这些不是用户想听的。
+ * 做成可关的开关而不是硬过滤：偶尔确实有人想找伴奏，
+ * 一刀切掉反而堵死了正当需求。
+ */
+const JUNK_WORDS = [
+  'dj',
+  '伴奏',
+  'karaoke',
+  'ktv',
+  '串烧',
+  '慢摇',
+  '喊麦',
+  '土嗨',
+  '广场舞',
+  '电音版',
+  '加速版',
+  '减速版',
+  '降调',
+  '升调',
+  '魔改',
+  '重低音',
+  '车载',
+  '抖音版',
+  '网红版',
+  '改编版'
+]
+
+function isJunk(song: Song): boolean {
+  const name = song.name.toLowerCase()
+  return JUNK_WORDS.some((word) => name.includes(word))
+}
+
+/** 是否显示被过滤掉的魔改版本 */
+const showJunk = ref(false)
+
+/** 未过滤的完整结果 */
+const rawSongs = ref<Song[]>([])
+
+/** 被过滤掉的数量，用于提示用户「隐藏了多少条」 */
+const hiddenCount = ref(0)
+
+/** 按当前开关把结果写进 songs */
+function applyFilter(): void {
+  const clean = rawSongs.value.filter((song) => !isJunk(song))
+  hiddenCount.value = rawSongs.value.length - clean.length
+  const base = showJunk.value ? rawSongs.value : clean
+  // 全被过滤掉时退回原始结果 —— 宁可看到杂的，也别给个空列表
+  songs.value = base.length > 0 ? base : rawSongs.value
+}
+
+function toggleJunk(): void {
+  showJunk.value = !showJunk.value
+  applyFilter()
+  notify(showJunk.value ? '已显示全部版本' : `已隐藏 ${hiddenCount.value} 首魔改版本`)
+}
+
 /** 拉取该艺人的歌曲 */
 async function loadSongs(): Promise<void> {
   const current = artist.value
@@ -90,13 +150,15 @@ async function loadSongs(): Promise<void> {
      * 过滤后若为空（某些平台歌手名写法不一致），就退回全部结果，有总比没有强。
      */
     const byThisArtist = all.filter((song) => song.singer.includes(current.name))
-    songs.value = byThisArtist.length > 0 ? byThisArtist : all
+    rawSongs.value = byThisArtist.length > 0 ? byThisArtist : all
+    applyFilter()
 
     if (songs.value.length === 0) {
       error.value = `没有搜到「${current.name}」的歌曲，可能该平台没有收录`
     }
   } catch (err) {
     error.value = cleanIpcError(err)
+    rawSongs.value = []
     songs.value = []
   } finally {
     loading.value = false
@@ -153,9 +215,21 @@ async function downloadSong(song: Song): Promise<void> {
         <AppIcon name="back" :size="18" />
       </button>
       <div class="grow"></div>
+
       <span v-if="artist && songs.length > 0" class="faint small-text">
-        {{ songs.length }} 首歌
+        {{ songs.length }} 首歌<template v-if="hiddenCount > 0 && !showJunk">
+          · 已滤掉 {{ hiddenCount }} 首魔改</template
+        >
       </span>
+
+      <button
+        v-if="hiddenCount > 0 || showJunk"
+        class="ghost small"
+        :title="showJunk ? '隐藏 DJ / 伴奏等魔改版本' : '显示被隐藏的魔改版本'"
+        @click="toggleJunk"
+      >
+        {{ showJunk ? '隐藏魔改版' : `显示魔改版 (${hiddenCount})` }}
+      </button>
     </header>
 
     <!-- 艺人资料 -->

@@ -59,16 +59,27 @@ watch(
   }
 )
 
-// 真的缺图时才去请求，且同一首歌只试一次
-watch(needFallback, async (need) => {
-  if (!need || resolved.value || !props.song) return
-  try {
-    const url = await resolveCover(props.song)
-    if (url) resolved.value = url
-  } catch {
-    /* 补图失败就保持占位图标，不影响其它功能 */
-  }
-})
+/**
+ * 真的缺图时才去请求，且同一首歌只试一次。
+ *
+ * immediate 是关键：组件挂载时如果本来就缺封面（酷狗、酷我大量如此），
+ * 不立即执行的话这个 watch 永远不会触发 —— 因为值从未「变化」过。
+ * 少了这个选项，补图就只对「加载失败」生效，对「一开始就没图」完全没用，
+ * 列表里那些歌于是永远没有封面。
+ */
+watch(
+  needFallback,
+  async (need) => {
+    if (!need || resolved.value || !props.song) return
+    try {
+      const url = await resolveCover(props.song)
+      if (url) resolved.value = url
+    } catch {
+      /* 补图失败就保持占位图标，不影响其它功能 */
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <template>

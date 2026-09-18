@@ -24,6 +24,11 @@ export default createRouter({
       component: () => import('../views/ArtistView.vue')
     },
     {
+      path: '/album',
+      name: 'album',
+      component: () => import('../views/AlbumView.vue')
+    },
+    {
       path: '/now-playing',
       name: 'now-playing',
       component: () => import('../views/NowPlayingView.vue')

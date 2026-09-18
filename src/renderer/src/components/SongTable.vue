@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Song } from '@shared/types/music'
 import { PLATFORM_META, QUALITY_META, qualityRank } from '@shared/constants'
+import { useRouter } from 'vue-router'
 import { formatTime } from '../utils/format'
 import { useLibraryStore } from '../stores/library'
 
@@ -57,6 +58,23 @@ function isSelected(song: Song): boolean {
 
 // 收藏状态直接读音乐库，省得往每一层传 props
 const library = useLibraryStore()
+const router = useRouter()
+
+/**
+ * 打开歌曲所属的专辑。
+ *
+ * 刻意放在组件内部而不往上抛事件：所有用到这张表的地方
+ * （搜索结果、歌单、艺人页、专辑页）都能自动获得这个能力，
+ * 不必每个父组件各写一遍。
+ */
+function openAlbum(song: Song): void {
+  const name = song.albumName?.trim()
+  if (!name) return
+  void router.push({
+    path: '/album',
+    query: { name, singer: song.singer, platform: song.platform }
+  })
+}
 
 function isFavorite(song: Song): boolean {
   return library.isFavorite(song.id)
@@ -144,8 +162,8 @@ function isLossless(song: Song): boolean {
         <span
           class="col-album ellipsis faint"
           :class="{ clickable: !!song.albumName }"
-          :title="song.albumName ? `搜索专辑：${song.albumName}` : ''"
-          @click.stop="song.albumName && emit('search', song.albumName)"
+          :title="song.albumName ? `打开专辑：${song.albumName}` : ''"
+          @click.stop="openAlbum(song)"
         >
           {{ song.albumName || '—' }}
         </span>

@@ -86,6 +86,22 @@ export const useArtistStore = defineStore('artist', () => {
     selected.value = artist
   }
 
+  /**
+   * 按歌手名直接打开艺人页。
+   *
+   * 歌曲列表里只有歌手名字符串，没有完整的艺人信息，
+   * 所以先搜一次拿到资料，再进详情页。优先取名字完全一致的那位。
+   */
+  async function openByName(name: string): Promise<ArtistInfo | null> {
+    const kw = name.trim()
+    if (!kw) return null
+
+    await search(kw)
+    const exact = allArtists.value.find((a) => a.name === kw) ?? allArtists.value[0] ?? null
+    if (exact) selected.value = exact
+    return exact
+  }
+
   function clear(): void {
     keyword.value = ''
     platforms.value = []
@@ -106,6 +122,7 @@ export const useArtistStore = defineStore('artist', () => {
     total,
     search,
     select,
+    openByName,
     clear
   }
 })
