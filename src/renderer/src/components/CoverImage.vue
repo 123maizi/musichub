@@ -41,45 +41,52 @@ const props = withDefaults(
 
 const failed = ref(false)
 const resolved = ref('')
+const loading = ref(false)
 
 /** 最终使用的地址：优先平台给的，其次补全来的 */
 const finalSrc = computed(() => props.src || resolved.value)
 
-/** 什么时候需要补图：开了开关、有歌曲信息、且当前没有可用地址 */
-const needFallback = computed(
-  () => props.fallback && Boolean(props.song) && (!props.src || failed.value)
-)
+/**
+ * 尝试补一张封面。
+ * 只在「开了补图、有歌曲信息、平台又没给地址」时才动手。
+ */
+async function tryFallback(): Promise<void> {
+  if (!props.fallback || !props.song || props.src || loading.value) return
+  if (resolved.value) return
 
-// 换歌时重置，否则新封面会被上一首的失败状态连累
+  loading.value = true
+  try {
+    const url = await resolveCover(props.song)
+    if (url) resolved.value = url
+  } catch {
+    /* 补图失败就保持占位图标，不影响其它功能 */
+  } finally {
+    loading.value = false
+  }
+}
+
+/**
+ * 换歌时重置状态并重新判断是否要补图。
+ *
+ * 这里刻意以 song.id 为触发源，而不是「是否需要补图」这个布尔值 ——
+ * 后者在两首「都没有封面」的歌之间切换时始终为 true、从未变化，
+ * watch 于是不触发：表现为上一首补上了、这一首却没补。
+ * 播放条缩略图时有时无，就是这个原因。
+ */
 watch(
-  () => [props.src, props.song?.id],
+  () => props.song?.id,
   () => {
     failed.value = false
     resolved.value = ''
-  }
-)
-
-/**
- * 真的缺图时才去请求，且同一首歌只试一次。
- *
- * immediate 是关键：组件挂载时如果本来就缺封面（酷狗、酷我大量如此），
- * 不立即执行的话这个 watch 永远不会触发 —— 因为值从未「变化」过。
- * 少了这个选项，补图就只对「加载失败」生效，对「一开始就没图」完全没用，
- * 列表里那些歌于是永远没有封面。
- */
-watch(
-  needFallback,
-  async (need) => {
-    if (!need || resolved.value || !props.song) return
-    try {
-      const url = await resolveCover(props.song)
-      if (url) resolved.value = url
-    } catch {
-      /* 补图失败就保持占位图标，不影响其它功能 */
-    }
+    void tryFallback()
   },
   { immediate: true }
 )
+
+/** 平台给了地址但图片加载失败时，也去补一张 */
+watch(failed, (isFailed) => {
+  if (isFailed) void tryFallback()
+})
 </script>
 
 <template>
