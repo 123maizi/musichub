@@ -19,6 +19,11 @@ export default createRouter({
       component: () => import('../views/DownloadView.vue')
     },
     {
+      path: '/artist',
+      name: 'artist',
+      component: () => import('../views/ArtistView.vue')
+    },
+    {
       path: '/now-playing',
       name: 'now-playing',
       component: () => import('../views/NowPlayingView.vue')

@@ -54,7 +54,12 @@ const api = {
   /* ------------------------------ 搜索 ------------------------------ */
   search: {
     search: (req: SearchRequest) => invoke(CH.searchMulti, req),
-    providers: () => invoke(CH.searchProviders)
+    providers: () => invoke(CH.searchProviders),
+    /** 艺人（歌手）搜索：返回五个平台各自的艺人列表 */
+    artists: (keyword: string, platforms?: string[]) =>
+      invoke(CH.searchArtists, keyword, platforms) as Promise<
+        import('@shared/types/artist').ArtistSearchResponse
+      >
   },
 
   /* ------------------------------ 播放 ------------------------------ */

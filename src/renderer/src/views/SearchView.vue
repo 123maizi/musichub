@@ -1,16 +1,37 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { PLATFORM_META } from '@shared/constants'
 import type { Song } from '@shared/types/music'
 import SongTable from '../components/SongTable.vue'
+import { useArtistStore, type ArtistInfo } from '../stores/artist'
 import { useSearchStore } from '../stores/search'
 import { usePlayerStore } from '../stores/player'
 import { useDownloadStore } from '../stores/downloads'
 import { useSourceStore } from '../stores/sources'
 
+const router = useRouter()
 const search = useSearchStore()
+const artistStore = useArtistStore()
 const player = usePlayerStore()
 const downloads = useDownloadStore()
 const sources = useSourceStore()
+
+/** 搜索模式：歌曲 / 歌手 */
+const mode = ref<'song' | 'artist'>('song')
+
+/** 切模式后如果输入框已有内容，顺手搜一次，省得用户再按回车 */
+function switchMode(next: 'song' | 'artist'): void {
+  if (mode.value === next) return
+  mode.value = next
+  if (search.keyword.trim()) runSearch()
+}
+
+/** 点艺人卡片 → 记住他并进入艺人页 */
+function openArtist(artist: ArtistInfo): void {
+  artistStore.select(artist)
+  void router.push('/artist')
+}
 
 const inputEl = ref<HTMLInputElement | null>(null)
 const toast = ref<string | null>(null)
@@ -22,7 +43,12 @@ onMounted(() => {
 })
 
 function runSearch(): void {
-  void search.search()
+  // 两条链路完全独立：歌曲搜索走 search store，歌手搜索走 artist store
+  if (mode.value === 'artist') {
+    void artistStore.search(search.keyword)
+  } else {
+    void search.search()
+  }
 }
 
 function showToast(message: string): void {
@@ -107,7 +133,17 @@ async function downloadSelected(): Promise<void> {
       </div>
 
       <div class="meta-row">
+        <!-- 搜索模式：歌曲 / 歌手 -->
         <div class="channels">
+          <button class="ghost small" :class="{ active: mode === 'song' }" @click="switchMode('song')">
+            歌曲
+          </button>
+          <button class="ghost small" :class="{ active: mode === 'artist' }" @click="switchMode('artist')">
+            歌手
+          </button>
+        </div>
+
+        <div v-if="mode === 'song'" class="channels">
           <button
             class="ghost small"
             :class="{ active: search.channel === 'builtin' }"
@@ -128,33 +164,41 @@ async function downloadSelected(): Promise<void> {
 
         <div class="grow"></div>
 
-        <span v-if="search.totalCount > 0" class="faint small-text">
-          共 {{ search.totalCount }} 条 · 耗时 {{ search.cost }}ms
-        </span>
+        <template v-if="mode === 'song'">
+          <span v-if="search.totalCount > 0" class="faint small-text">
+            共 {{ search.totalCount }} 条 · 耗时 {{ search.cost }}ms
+          </span>
 
-        <button
-          :class="selectMode ? 'primary small' : 'ghost small'"
-          :disabled="search.totalCount === 0"
-          @click="toggleSelectMode"
-        >
-          {{ selectMode ? '退出多选' : '多选' }}
-        </button>
+          <button
+            :class="selectMode ? 'primary small' : 'ghost small'"
+            :disabled="search.totalCount === 0"
+            @click="toggleSelectMode"
+          >
+            {{ selectMode ? '退出多选' : '多选' }}
+          </button>
 
-        <template v-if="selectMode">
-          <span class="faint small-text">已选 {{ selectedIds.length }} 首</span>
-          <button class="primary small" :disabled="selectedIds.length === 0" @click="downloadSelected">
-            下载所选
+          <template v-if="selectMode">
+            <span class="faint small-text">已选 {{ selectedIds.length }} 首</span>
+            <button class="primary small" :disabled="selectedIds.length === 0" @click="downloadSelected">
+              下载所选
+            </button>
+          </template>
+
+          <button
+            v-else
+            class="ghost small"
+            :disabled="search.totalCount === 0"
+            @click="downloadAll"
+          >
+            全部下载
           </button>
         </template>
 
-        <button
-          v-else
-          class="ghost small"
-          :disabled="search.totalCount === 0"
-          @click="downloadAll"
-        >
-          全部下载
-        </button>
+        <template v-else>
+          <span v-if="artistStore.total > 0" class="faint small-text">
+            {{ artistStore.total }} 位艺人 · 耗时 {{ artistStore.cost }}ms
+          </span>
+        </template>
       </div>
 
       <!-- 平台筛选 -->
@@ -196,9 +240,10 @@ async function downloadSelected(): Promise<void> {
       </span>
     </div>
 
-    <!-- 结果表 -->
+    <!-- 结果区：歌曲表 / 艺人网格 -->
     <div class="results">
       <SongTable
+        v-if="mode === 'song'"
         v-model:selected-ids="selectedIds"
         :songs="search.visibleSongs"
         :loading="search.loading"
@@ -210,6 +255,36 @@ async function downloadSelected(): Promise<void> {
         @download="downloadSong"
         @search="searchByKeyword"
       />
+
+      <!-- 歌手模式 -->
+      <div v-else class="artists">
+        <div v-if="artistStore.loading" class="empty">
+          <span class="mono">正在检索艺人…</span>
+        </div>
+
+        <div v-else-if="artistStore.allArtists.length === 0" class="empty">
+          <span>{{ artistStore.error || '输入歌手名开始搜索' }}</span>
+        </div>
+
+        <div v-else class="artist-grid">
+          <button
+            v-for="artist in artistStore.allArtists"
+            :key="artist.id"
+            class="artist-card"
+            :title="`查看「${artist.name}」的歌曲`"
+            @click="openArtist(artist)"
+          >
+            <div class="artist-avatar">
+              <CoverImage :src="artist.picUrl" :icon-size="28" />
+            </div>
+            <div class="artist-name ellipsis">{{ artist.name }}</div>
+            <div class="artist-meta">
+              <span class="tag">{{ PLATFORM_META[artist.platform]?.short ?? artist.platform }}</span>
+              <span v-if="artist.songCount" class="faint">{{ artist.songCount }} 首</span>
+            </div>
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 分页 -->
@@ -375,6 +450,70 @@ async function downloadSelected(): Promise<void> {
 
 .results :deep(.body) {
   flex: 1;
+}
+
+/* ------------------------------ 艺人网格 ------------------------------ */
+
+.artists {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 14px 24px;
+}
+
+.artist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 14px;
+}
+
+.artist-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 10px 14px;
+  font-family: inherit;
+  color: inherit;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, transform 0.1s;
+}
+
+.artist-card:hover {
+  background: var(--bg-hover);
+  border-color: #33333e;
+}
+
+.artist-card:active {
+  transform: scale(0.98);
+}
+
+.artist-avatar {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+}
+
+.artist-name {
+  max-width: 100%;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.artist-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
 }
 
 .pager {

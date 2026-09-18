@@ -17,6 +17,9 @@ import type {
 import { APP_CONST, qualityRank } from '@shared/constants'
 import type { SourceManager } from '../source/manager'
 import { builtinProviders, type ProviderSearchResult, type SearchProvider } from './builtin'
+// 艺人搜索是独立模块（接口结构完全不同），单独引入，刻意不动已经稳定的 builtin
+import { artistSearchers, ARTIST_PLATFORM_NAMES } from './artist'
+import type { ArtistInfo, ArtistSearchResponse, PlatformArtistResult } from '@shared/types/artist'
 
 export interface SearchEngineDeps {
   sources: SourceManager
@@ -51,6 +54,79 @@ export class SearchEngine {
   /** 清空搜索缓存 */
   clearCache(): void {
     this.cache.clear()
+  }
+
+  /* ------------------------------ 艺人搜索 ------------------------------ */
+
+  /**
+   * 艺人搜索：五个平台并发，单平台失败不影响其它平台。
+   * 与歌曲搜索是两条独立链路，也不共用缓存。
+   */
+  async searchArtists(keyword: string, platforms?: string[]): Promise<ArtistSearchResponse> {
+    const started = Date.now()
+    const kw = (keyword ?? '').trim()
+    if (!kw) return { keyword: kw, platforms: [], cost: 0 }
+
+    const wanted = platforms && platforms.length > 0 ? new Set(platforms) : null
+    const targets = Object.entries(artistSearchers).filter(([id]) => !wanted || wanted.has(id))
+
+    const settled: PlatformArtistResult[] = await Promise.all(
+      targets.map(async ([id, searcher]): Promise<PlatformArtistResult> => {
+        const t0 = Date.now()
+        const providerName = ARTIST_PLATFORM_NAMES[id] ?? id
+        try {
+          const artists = await searcher(kw, 1, 15)
+          return { platform: id, providerId: id, providerName, artists, cost: Date.now() - t0 }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          this.deps.onLog?.('warn', 'search', `艺人搜索失败 ${providerName}: ${message}`)
+          return {
+            platform: id,
+            providerId: id,
+            providerName,
+            artists: [],
+            cost: Date.now() - t0,
+            error: message
+          }
+        }
+      })
+    )
+
+    // 每个平台内部排序：同名艺人很多，需要把「主流的那位」顶上来
+    for (const group of settled) {
+      group.artists = group.artists
+        .map((artist, index) => ({ artist, index, score: this.scoreArtist(artist, kw) }))
+        .sort((a, b) => b.score - a.score || a.index - b.index)
+        .map((item) => item.artist)
+    }
+
+    return { keyword: kw, platforms: settled, cost: Date.now() - started }
+  }
+
+  /**
+   * 艺人排序打分。
+   *
+   * 完全同名的优先；其次看作品数量 —— 这是判断「谁才是那个主流歌手」
+   * 最有效的信号，同名的小号作品数通常只有个位数。
+   */
+  private scoreArtist(artist: ArtistInfo, keyword: string): number {
+    const kw = keyword.trim().toLowerCase()
+    const name = artist.name.toLowerCase()
+    let score = 0
+
+    if (name === kw) score += 100
+    else if (name.includes(kw)) score += 40
+
+    if (artist.songCount && artist.songCount > 0) {
+      score += Math.min(Math.log10(artist.songCount) * 20, 60)
+    }
+    if (artist.albumCount && artist.albumCount > 0) {
+      score += Math.min(Math.log10(artist.albumCount) * 10, 20)
+    }
+    // 有头像通常意味着平台收录更完整，轻微加分
+    if (artist.picUrl) score += 5
+
+    return score
   }
 
   /** 内置 Provider 名录（供 UI 展示可搜索的平台） */

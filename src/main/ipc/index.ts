@@ -83,6 +83,11 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(CH.searchProviders, () => search.listProviders())
 
+  // 艺人搜索：与歌曲搜索并行的一条独立链路
+  ipcMain.handle(CH.searchArtists, (_e, keyword: string, platforms?: string[]) =>
+    search.searchArtists(keyword, platforms)
+  )
+
   /* ------------------------------ 播放 ------------------------------ */
 
   ipcMain.handle(CH.playGetUrl, (_e, req: MusicUrlRequest) => resolver.resolve(req))

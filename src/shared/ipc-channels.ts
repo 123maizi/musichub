@@ -21,6 +21,8 @@ export const CH = {
   // 搜索
   searchMulti: 'search:multi',
   searchProviders: 'search:providers',
+  /** 艺人（歌手）搜索 */
+  searchArtists: 'search:artists',
   // 播放
   playGetUrl: 'play:getUrl',
   playGetLyric: 'play:getLyric',
