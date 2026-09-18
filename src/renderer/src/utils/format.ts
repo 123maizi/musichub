@@ -6,6 +6,8 @@ export interface LyricLine {
   /** 时间点（秒） */
   time: number
   text: string
+  /** 该行的译文（无译文时为空） */
+  trans?: string
 }
 
 const TIME_TAG = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g
@@ -38,6 +40,46 @@ export function parseLrc(lrc: string): LyricLine[] {
   }
 
   return lines.sort((a, b) => a.time - b.time)
+}
+
+/**
+ * 把译文 LRC 按时间戳合并到主歌词上。
+ *
+ * 时间戳不会完全一致（平台的两份 LRC 常差几十毫秒），所以按最近邻匹配，
+ * 容差 0.5 秒；超出容差宁可留空，也不硬塞一句不相干的译文。
+ */
+export function mergeTranslation(lines: LyricLine[], tlyric?: string): LyricLine[] {
+  if (!tlyric || !tlyric.trim() || lines.length === 0) return lines
+
+  const trans = parseLrc(tlyric).filter((line) => line.text)
+  if (trans.length === 0) return lines
+
+  const TRANS_TOLERANCE = 0.5
+
+  return lines.map((line) => {
+    let best: LyricLine | null = null
+    let bestGap = Number.POSITIVE_INFINITY
+
+    for (const item of trans) {
+      const gap = Math.abs(item.time - line.time)
+      if (gap < bestGap) {
+        bestGap = gap
+        best = item
+      }
+      // 已按时间排序，往后只会更远
+      if (item.time > line.time + TRANS_TOLERANCE) break
+    }
+
+    if (!best || bestGap > TRANS_TOLERANCE) return line
+    // 译文和原文一样就不必重复显示
+    if (best.text === line.text) return line
+    return { ...line, trans: best.text }
+  })
+}
+
+/** 解析主歌词 + 译文，一步到位 */
+export function parseLrcWithTranslation(lrc: string, tlyric?: string): LyricLine[] {
+  return mergeTranslation(parseLrc(lrc), tlyric)
 }
 
 /** 找出当前播放时间对应的歌词行下标 */

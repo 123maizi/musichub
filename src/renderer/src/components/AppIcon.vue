@@ -41,6 +41,7 @@ export type IconName =
   | 'disc'
   | 'trash'
   | 'edit'
+  | 'translate'
 
 /** 实心路径：播放控制与状态标记 */
 const FILLED_PATHS: Partial<Record<IconName, string>> = {
@@ -71,7 +72,10 @@ const STROKE_PATHS: Partial<Record<IconName, string>> = {
   heart:
     'M20.8 6.6a4.6 4.6 0 0 0-6.5-.3L12 8.6l-2.3-2.3a4.6 4.6 0 1 0-6.5 6.5l7.5 7.5a1.4 1.4 0 0 0 2 0l7.5-7.5a4.6 4.6 0 0 0 .6-6.2z',
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20.5 20.5l-4.2-4.2',
-  back: 'M19 12H5M11 18l-6-6 6-6'
+  back: 'M19 12H5M11 18l-6-6 6-6',
+  // 地球：翻译/语言。三条子路径合成一个 d（模板只渲染单条 path）
+  translate:
+    'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 3c2.5 2.4 3.8 5.4 3.8 9s-1.3 6.6-3.8 9c-2.5-2.4-3.8-5.4-3.8-9S9.5 5.4 12 3 M3.4 12h17.2'
 }
 </script>
 

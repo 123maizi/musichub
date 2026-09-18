@@ -6,7 +6,7 @@
  */
 import { contextBridge, ipcRenderer } from 'electron'
 import { CH, EV } from '@shared/ipc-channels'
-import type { Lyric, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
+import type { Lyric, LyricTranslateResult, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
 
@@ -72,6 +72,9 @@ const api = {
     getUrl: (req: MusicUrlRequest) => invoke(CH.playGetUrl, req),
     getLyric: (song: Song, sourceIds?: string[]) =>
       invoke(CH.playGetLyric, song, sourceIds) as Promise<Lyric | null>,
+    /** 歌词翻译（外语歌没有官方翻译时用） */
+    translateLyric: (lyric: Lyric, target?: string) =>
+      invoke(CH.playTranslateLyric, lyric, target) as Promise<LyricTranslateResult>,
     probe: (url: string) => invoke(CH.playProbe, url),
     /**
      * 上报音源质量问题（例如只返回试听片段）。

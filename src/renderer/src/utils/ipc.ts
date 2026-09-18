@@ -10,7 +10,7 @@
  *
  * 结论：凡是会把对象送过 IPC 的方法，都在这一层先转成纯数据。
  */
-import type { Lyric, MusicUrlRequest, MusicUrlResult, Song } from '@shared/types/music'
+import type { Lyric, LyricTranslateResult, MusicUrlRequest, MusicUrlResult, Song } from '@shared/types/music'
 import type { DownloadAddRequest, DownloadTask } from '@shared/types/download'
 
 /**
@@ -36,6 +36,15 @@ export function getPlayUrl(req: MusicUrlRequest): Promise<MusicUrlResult> {
 /** 取歌词 */
 export function getLyric(song: Song, sourceIds?: string[]): Promise<Lyric | null> {
   return window.api.player.getLyric(toPlain(song), sourceIds)
+}
+
+/**
+ * 翻译歌词。
+ * lyric 里可能挂着从主进程传来的 Proxy 包装，必须先拆成纯对象再过 IPC，
+ * 否则会报 "An object could not be cloned"。
+ */
+export function translateLyric(lyric: Lyric, target?: string): Promise<LyricTranslateResult> {
+  return window.api.player.translateLyric(toPlain(lyric), target)
 }
 
 /** 加入下载队列（songs 通常直接来自响应式列表） */

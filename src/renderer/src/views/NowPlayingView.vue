@@ -55,6 +55,24 @@ const lyricHint = computed(() => {
   return '这首歌暂时没有歌词'
 })
 
+/* ------------------------------ 歌词翻译 ------------------------------ */
+
+const translateLabel = computed(() => {
+  if (player.translating) return '翻译中…'
+  if (player.translated) return player.showTranslation ? '隐藏译文' : '显示译文'
+  return '翻译歌词'
+})
+
+const translateTitle = computed(() =>
+  player.translated ? '点击切换译文显示' : '把外语歌词翻成中文'
+)
+
+/** 已经翻过就不重复请求（翻译接口有配额），只切换显示 */
+async function onTranslate(): Promise<void> {
+  const ok = await player.translateCurrentLyric()
+  if (!ok && player.translateError) toast.value = player.translateError
+}
+
 /* ------------------------------ 进度条 ------------------------------ */
 
 const displayProgress = computed(() =>
@@ -222,6 +240,22 @@ function queueCurrent(): void {
 
       <!-- 右：歌词 -->
       <div class="right">
+        <div v-if="hasLyric" class="lyric-bar">
+          <button
+            class="translate-btn"
+            :class="{ on: player.translated && player.showTranslation }"
+            :disabled="player.translating"
+            :title="translateTitle"
+            @click="onTranslate"
+          >
+            <AppIcon name="translate" :size="14" />
+            <span>{{ translateLabel }}</span>
+          </button>
+          <span v-if="player.translateError" class="translate-note ellipsis">
+            {{ player.translateError }}
+          </span>
+        </div>
+
         <div v-if="!hasLyric" class="lyric-empty">
           <AppIcon name="music" :size="26" />
           <span>{{ lyricHint }}</span>
@@ -237,7 +271,10 @@ function queueCurrent(): void {
             :data-line="index"
             @click="player.seek(line.time)"
           >
-            {{ line.text || '·' }}
+            <span class="lyric-main">{{ line.text || '·' }}</span>
+            <span v-if="player.showTranslation && line.trans" class="lyric-trans">
+              {{ line.trans }}
+            </span>
           </div>
           <div class="lyric-pad"></div>
         </div>
@@ -557,6 +594,71 @@ function queueCurrent(): void {
   color: var(--accent);
   font-size: 17px;
   font-weight: 600;
+}
+
+/* ------------------------------ 歌词翻译 ------------------------------ */
+
+.lyric-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 8px;
+  flex: none;
+}
+
+.translate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  border-radius: 16px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.18s, background 0.18s, border-color 0.18s;
+}
+
+.translate-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.translate-btn.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.translate-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.translate-note {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  min-width: 0;
+}
+
+/* 译文：比原文小一档、浅一档，读到主句时译文不抢戏 */
+.lyric-main {
+  display: block;
+}
+
+.lyric-trans {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-faint);
+  opacity: 0.85;
+}
+
+.lyric-line.active .lyric-trans {
+  color: var(--text-dim);
+  opacity: 1;
 }
 
 .lyric-empty {

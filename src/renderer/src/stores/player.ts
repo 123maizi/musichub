@@ -7,8 +7,13 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Lyric, MusicUrlResult, Quality, Song } from '@shared/types/music'
-import { cleanIpcError, findLyricIndex, parseLrc, type LyricLine } from '../utils/format'
-import { getLyric as fetchLyric, getPlayUrl, reportBadSource } from '../utils/ipc'
+import { cleanIpcError, findLyricIndex, parseLrcWithTranslation, type LyricLine } from '../utils/format'
+import {
+  getLyric as fetchLyric,
+  getPlayUrl,
+  reportBadSource,
+  translateLyric
+} from '../utils/ipc'
 import { useLibraryStore } from './library'
 
 /** 播放模式 */
@@ -43,6 +48,15 @@ export const usePlayerStore = defineStore('player', () => {
   const lyricRaw = ref<Lyric | null>(null)
   const lyricLines = ref<LyricLine[]>([])
 
+  /** 歌词翻译状态：进行中 / 已翻译 / 失败原因 */
+  const translating = ref(false)
+  const translated = ref(false)
+  const translateError = ref('')
+  /** 已翻译过的歌曲 id，避免切歌回来重复消耗翻译配额 */
+  const translatedSongId = ref('')
+  /** 是否显示译文（用户可随时关掉） */
+  const showTranslation = ref(true)
+
   let audio: HTMLAudioElement | null = null
 
   /* ------------------------------ 派生 ------------------------------ */
@@ -67,6 +81,11 @@ export const usePlayerStore = defineStore('player', () => {
   const currentLyricIndex = computed(() => findLyricIndex(lyricLines.value, currentTime.value))
 
   const hasLyric = computed(() => lyricLines.value.length > 0)
+
+  /** 当前歌词是否含译文（用于决定界面上要不要留译文行） */
+  const hasTranslation = computed(() =>
+    showTranslation.value && lyricLines.value.some((line) => !!line.trans)
+  )
 
   /* ------------------------------ 试听片段检测 ------------------------------ */
 
@@ -240,6 +259,10 @@ export const usePlayerStore = defineStore('player', () => {
     attempts.value = []
     lyricLines.value = []
     lyricRaw.value = null
+    // 翻译状态跟着歌曲走，切歌必须清干净，否则会把上一首的译文留在界面上
+    translated.value = false
+    translateError.value = ''
+    translatedSongId.value = ''
     currentTime.value = 0
     // 重置音频上报的时长，真实值会在加载与播放过程中补上
     mediaDuration.value = 0
@@ -275,9 +298,61 @@ export const usePlayerStore = defineStore('player', () => {
       if (!lyric || current.value?.id !== song.id) return
       lyricRaw.value = lyric
       const main = lyric.lyric || lyric.lxlyric || ''
-      lyricLines.value = parseLrc(main)
+      // 平台自带翻译（QQ、网易云常有）直接合并展示，不用再翻
+      lyricLines.value = parseLrcWithTranslation(main, lyric.tlyric)
+      translated.value = lyricLines.value.some((line) => !!line.trans)
+      translateError.value = ''
+      translatedSongId.value = translated.value ? song.id : ''
     } catch {
       lyricLines.value = []
+      translated.value = false
+    }
+  }
+
+  /**
+   * 翻译当前歌词。
+   *
+   * 只在「确实产生了译文」时才算成功 —— 上一版栽在这里：翻译接口报错后
+   * 静默保留了原文，界面却显示翻译成功，用户看到的是没变的原文。
+   */
+  async function translateCurrentLyric(): Promise<boolean> {
+    const song = current.value
+    const lyric = lyricRaw.value
+    if (!song || !lyric || translating.value) return false
+
+    // 已经翻过这首就不用重复请求（翻译接口有配额）
+    if (translated.value && translatedSongId.value === song.id) {
+      showTranslation.value = !showTranslation.value
+      return true
+    }
+
+    translating.value = true
+    translateError.value = ''
+
+    try {
+      const result = await translateLyric(lyric, 'zh-CN')
+      // 期间换歌了就丢弃结果，别把上一首的译文贴到这一首上
+      if (current.value?.id !== song.id) return false
+
+      if (!result.translated || !result.lyric) {
+        translateError.value = result.error || '翻译失败'
+        return false
+      }
+
+      lyricRaw.value = result.lyric
+      const main = result.lyric.lyric || result.lyric.lxlyric || ''
+      lyricLines.value = parseLrcWithTranslation(main, result.lyric.tlyric)
+      translated.value = true
+      translatedSongId.value = song.id
+      showTranslation.value = true
+      // 部分行没翻出来时也如实说明，不假装全翻好了
+      translateError.value = result.error ?? ''
+      return true
+    } catch (err) {
+      translateError.value = cleanIpcError(err)
+      return false
+    } finally {
+      translating.value = false
     }
   }
 
@@ -448,10 +523,15 @@ export const usePlayerStore = defineStore('player', () => {
     attempts,
     lyricRaw,
     lyricLines,
+    translating,
+    translated,
+    translateError,
+    showTranslation,
     // 派生
     progress,
     currentLyricIndex,
     hasLyric,
+    hasTranslation,
     // 动作
     play,
     pause,
@@ -467,6 +547,7 @@ export const usePlayerStore = defineStore('player', () => {
     addToQueue,
     removeFromQueue,
     clearQueue,
-    loadLyric
+    loadLyric,
+    translateCurrentLyric
   }
 })

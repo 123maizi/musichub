@@ -1,6 +1,6 @@
 {
   "name": "musichub",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "MusicHub - 多音源音乐聚合播放与下载器",
   "main": "./out/main/index.js",
   "author": "MusicHub",
@@ -14,6 +14,8 @@
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "verify:search": "esbuild scripts/verify-search.ts --bundle --format=esm --platform=node --outfile=.tmp/verify-search.mjs --alias:@shared=./src/shared --log-level=warning && node .tmp/verify-search.mjs",
+    "verify:translate": "esbuild scripts/verify-translate.ts --bundle --format=esm --platform=node --outfile=.tmp/verify-translate.mjs --alias:@shared=./src/shared --log-level=warning && node .tmp/verify-translate.mjs",
+    "cdp": "node scripts/cdp.mjs",
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "npm run build && electron-builder --mac",
     "build:linux": "npm run build && electron-builder --linux"

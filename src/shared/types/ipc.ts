@@ -2,7 +2,15 @@
  * IPC 契约
  * 主进程 / 预加载 / 渲染层三方共享的唯一接口真相
  */
-import type { Lyric, MusicUrlRequest, MusicUrlResult, SearchRequest, SearchResponse, Song } from './music'
+import type {
+  Lyric,
+  LyricTranslateResult,
+  MusicUrlRequest,
+  MusicUrlResult,
+  SearchRequest,
+  SearchResponse,
+  Song
+} from './music'
 import type { DownloadAddRequest, DownloadConfig, DownloadTask } from './download'
 import type { SourceImportResult, SourceInfo } from './source'
 
@@ -63,6 +71,8 @@ export interface PlayerApi {
   getUrl(req: MusicUrlRequest): Promise<MusicUrlResult>
   /** 获取歌词 */
   getLyric(song: Song, sourceIds?: string[]): Promise<Lyric | null>
+  /** 翻译歌词（外语歌无官方翻译时使用） */
+  translateLyric(lyric: Lyric, target?: string): Promise<LyricTranslateResult>
   /** 校验地址是否可用（HEAD 探测） */
   probe(url: string): Promise<{ ok: boolean; size?: number; ext?: string; error?: string }>
 }

@@ -7,7 +7,7 @@
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron'
 import { existsSync } from 'node:fs'
 
-import type { MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
+import type { Lyric, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
 import type { SourceManager } from '@main/core/source/manager'
@@ -17,6 +17,7 @@ import type { DownloadManager } from '@main/core/download/manager'
 import type { StreamProxy } from '@main/core/proxy/stream-proxy'
 import { probeUrl } from '@main/core/net/http'
 import { resolveCover } from '@main/core/cover'
+import { detectSourceLang, translateLrcDetailed } from '@main/core/lyric/translate'
 
 // 通道名唯一定义源在 shared 层，这里引入并原样再导出给外部引用
 import { CH, EV } from '@shared/ipc-channels'
@@ -100,6 +101,45 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(CH.playGetLyric, (_e, song: Song, sourceIds?: string[]) =>
     resolver.getLyric(song, sourceIds)
   )
+
+  // 歌词翻译：源语言自动探测，失败原因如实回报，绝不把原文当译文返回
+  ipcMain.handle(CH.playTranslateLyric, async (_e, lyric: Lyric, target?: string) => {
+    const main = lyric?.lyric || lyric?.lxlyric || ''
+
+    // 平台已带官方翻译 → 直接用，不必再翻
+    if (lyric?.tlyric && lyric.tlyric.trim()) {
+      return {
+        lyric,
+        translated: true,
+        lineCount: 0,
+        totalCount: 0,
+        sourceLang: detectSourceLang(main),
+        error: undefined
+      }
+    }
+
+    const sourceLang = detectSourceLang(main)
+    const result = await translateLrcDetailed(main, target)
+    if (!result.translated) {
+      return {
+        lyric: null,
+        translated: false,
+        lineCount: 0,
+        totalCount: result.totalCount,
+        sourceLang,
+        error: result.error
+      }
+    }
+
+    return {
+      lyric: { ...lyric, tlyric: result.lrc, sourceId: `${lyric?.sourceId ?? 'builtin'}+translated` },
+      translated: true,
+      lineCount: result.successCount,
+      totalCount: result.totalCount,
+      sourceLang,
+      error: result.error
+    }
+  })
 
   ipcMain.handle(CH.playProbe, (_e, url: string) => probeUrl(url))
 

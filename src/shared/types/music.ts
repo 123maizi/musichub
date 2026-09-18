@@ -111,6 +111,26 @@ export interface Lyric {
   sourceId?: string
 }
 
+/**
+ * 歌词翻译结果。
+ * 必须带 translated 标记：翻译失败时界面要如实告诉用户，
+ * 而不是把原文当成译文展示（这个坑踩过一次）。
+ */
+export interface LyricTranslateResult {
+  /** 带译文的歌词；失败时为 null */
+  lyric: Lyric | null
+  /** 是否真的产生了翻译 */
+  translated: boolean
+  /** 真正被翻译的行数 */
+  lineCount: number
+  /** 总行数 */
+  totalCount: number
+  /** 识别到的源语言 */
+  sourceLang?: string
+  /** 失败或降级说明 */
+  error?: string
+}
+
 /** 搜索结果（按平台分组） */
 export interface PlatformSearchResult {
   platform: PlatformId
