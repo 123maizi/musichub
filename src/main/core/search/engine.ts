@@ -27,9 +27,30 @@ export class SearchEngine {
   private readonly deps: SearchEngineDeps
   private readonly providers: SearchProvider[]
 
+  /**
+   * 搜索结果短期缓存。
+   *
+   * 用户常来回切换关键词、翻回上一页、点歌手名反复进出，
+   * 每次都并发打五个平台既慢又容易触发限流。
+   * 90 秒的窗口足够覆盖这类操作，又不至于让结果显得陈旧。
+   */
+  private readonly cache = new Map<string, { response: SearchResponse; expireAt: number }>()
+
+  private static readonly CACHE_TTL = 90 * 1000
+
   constructor(deps: SearchEngineDeps) {
     this.deps = deps
     this.providers = [...builtinProviders]
+  }
+
+  private cacheKey(keyword: string, page: number, channel: string, platforms?: string[]): string {
+    const p = platforms && platforms.length > 0 ? [...platforms].sort().join(',') : 'all'
+    return `${channel}|${keyword}|${page}|${p}`
+  }
+
+  /** 清空搜索缓存 */
+  clearCache(): void {
+    this.cache.clear()
   }
 
   /** 内置 Provider 名录（供 UI 展示可搜索的平台） */
@@ -60,6 +81,14 @@ export class SearchEngine {
     }
 
     const channel = req.channel ?? 'builtin'
+
+    // 命中缓存直接返回，省掉五个平台的并发请求
+    const key = this.cacheKey(keyword, page, channel, req.platforms)
+    const cached = this.cache.get(key)
+    if (cached && Date.now() < cached.expireAt) {
+      return { ...cached.response, cost: 0 }
+    }
+
     const tasks =
       channel === 'source'
         ? await this.sourceSearchTasks(keyword, page, limit, req.platforms)
@@ -74,12 +103,23 @@ export class SearchEngine {
       this.rankSongs(result.songs, keyword)
     }
 
-    return {
+    const response: SearchResponse = {
       keyword,
       page,
       platforms: settled,
       cost: Date.now() - started
     }
+
+    // 写入缓存（顺手把过期项清掉）
+    if (this.cache.size > 60) {
+      const now = Date.now()
+      for (const [k, v] of this.cache) {
+        if (v.expireAt <= now) this.cache.delete(k)
+      }
+    }
+    this.cache.set(key, { response, expireAt: Date.now() + SearchEngine.CACHE_TTL })
+
+    return response
   }
 
   /* ------------------------------ 任务构造 ------------------------------ */

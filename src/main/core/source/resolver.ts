@@ -47,8 +47,58 @@ export interface ResolverDeps {
 export class MusicResolver {
   private readonly deps: ResolverDeps
 
+  /**
+   * 取流结果短期缓存。
+   *
+   * 音源给的多是带签名的临时地址（几分钟就失效），所以不能长期缓存；
+   * 但「重复播放同一首」「拖完进度重新取流」「切回上一首」这些动作极其频繁，
+   * 几分钟的缓存就足以省掉大量音源请求，也顺带降低触发限流的概率。
+   */
+  private readonly urlCache = new Map<
+    string,
+    { result: MusicUrlResult; expireAt: number }
+  >()
+
+  /** 缓存有效期 */
+  private static readonly CACHE_TTL = 4 * 60 * 1000
+
   constructor(deps: ResolverDeps) {
     this.deps = deps
+  }
+
+  private cacheKey(song: Song, quality?: Quality): string {
+    return `${song.platform}:${song.songmid}:${quality ?? 'auto'}`
+  }
+
+  /** 读缓存；过期即删 */
+  private readCache(song: Song, quality?: Quality): MusicUrlResult | null {
+    const key = this.cacheKey(song, quality)
+    const entry = this.urlCache.get(key)
+    if (!entry) return null
+    if (Date.now() >= entry.expireAt) {
+      this.urlCache.delete(key)
+      return null
+    }
+    return entry.result
+  }
+
+  /** 写缓存，顺带做一次惰性清理，避免 Map 无限膨胀 */
+  private writeCache(song: Song, requestQuality: Quality | undefined, result: MusicUrlResult): void {
+    if (this.urlCache.size > 200) {
+      const now = Date.now()
+      for (const [key, entry] of this.urlCache) {
+        if (entry.expireAt <= now) this.urlCache.delete(key)
+      }
+    }
+    this.urlCache.set(this.cacheKey(song, requestQuality), {
+      result,
+      expireAt: Date.now() + MusicResolver.CACHE_TTL
+    })
+  }
+
+  /** 清空缓存（音源重载或用户手动重试时用） */
+  clearCache(): void {
+    this.urlCache.clear()
   }
 
   /**
@@ -61,6 +111,13 @@ export class MusicResolver {
 
     if (song.platform === 'local') {
       throw new Error('本地歌曲无需取流')
+    }
+
+    // 命中缓存直接返回：重复播放、拖完进度重取、切回上一首都不必再打扰音源
+    const cached = this.readCache(song, req.quality)
+    if (cached) {
+      this.deps.onLog?.('info', 'resolver', `取流命中缓存 [${song.platform}] ${song.name}`)
+      return cached
     }
 
     const candidates = this.pickCandidates(song, req.sourceIds)
@@ -79,7 +136,9 @@ export class MusicResolver {
 
       const hit = await this.attemptGroup(group, song, quality, attempts)
       if (hit) {
-        return this.buildResult(hit, song, quality, attempts)
+        const result = this.buildResult(hit, song, quality, attempts)
+        this.writeCache(song, req.quality, result)
+        return result
       }
     }
 
