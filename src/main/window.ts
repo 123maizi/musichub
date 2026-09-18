@@ -123,9 +123,46 @@ const SELFTEST_SCRIPT = `
       proxyDirect = (err && err.message) ? err.message : String(err)
     }
 
-    // B 组：解包成纯数据 —— 这正是修复后 store 走的路径
-    const unwrapped = JSON.parse(JSON.stringify(plain))
-    const url = await window.api.player.getUrl({ song: unwrapped, quality: '320k' })
+    // B 组：解包成纯数据 —— 修复后 store 走的正是这条路
+    const started = Date.now()
+    const url = await window.api.player.getUrl({
+      song: JSON.parse(JSON.stringify(plain)),
+      quality: '320k'
+    })
+    const firstCost = Date.now() - started
+
+    // C 组：同样请求再来一次 —— 验证取流缓存是否命中
+    const started2 = Date.now()
+    await window.api.player.getUrl({
+      song: JSON.parse(JSON.stringify(plain)),
+      quality: '320k'
+    })
+    const cachedCost = Date.now() - started2
+
+    // D 组：真实 audio 元素，验证时长上报与进度推进
+    //      「进度条不走」的根因就在这：流不带 Content-Length 时 el.duration 是 NaN
+    const audio = new Audio()
+    audio.src = url.url
+    await new Promise((resolve) => {
+      const done = () => resolve()
+      audio.addEventListener('loadedmetadata', done, { once: true })
+      audio.addEventListener('error', done, { once: true })
+      setTimeout(done, 12000)
+    })
+
+    const rawDuration = audio.duration
+    let advanced = 0
+    let playError = ''
+    try {
+      await audio.play()
+      const before = audio.currentTime
+      await wait(3000)
+      advanced = +(audio.currentTime - before).toFixed(2)
+    } catch (err) {
+      playError = (err && err.message) ? err.message : String(err)
+    }
+    audio.pause()
+    audio.src = ''
 
     return {
       step: 'play',
@@ -135,15 +172,17 @@ const SELFTEST_SCRIPT = `
       proxyDirect,
       source: url.sourceName,
       quality: url.quality,
-      proxied: url.proxied,
-      attempts: (url.attempts || []).length,
-      urlHead: String(url.url).slice(0, 60),
-      // 原唱优先排序的实际效果：看每个平台前 4 名是谁
+      firstCost,
+      cachedCost,
+      mediaDuration: Number.isFinite(rawDuration) ? rawDuration : String(rawDuration),
+      songDuration: plain.duration,
+      advancedSeconds: advanced,
+      playError,
       ranking: res.platforms
         .filter((p) => p.songs && p.songs.length > 0)
         .map((p) =>
           p.platform + ' → ' +
-          p.songs.slice(0, 4).map((s) => s.name + '「' + s.singer + '」').join('  |  ')
+          p.songs.slice(0, 3).map((s) => s.name + '「' + s.singer + '」').join('  |  ')
         )
     }
   } catch (err) {
