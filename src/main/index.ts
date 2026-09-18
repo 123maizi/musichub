@@ -22,6 +22,7 @@ import { MusicResolver } from './core/source/resolver'
 import { StreamProxy } from './core/proxy/stream-proxy'
 import { DownloadManager } from './core/download/manager'
 import { JsonStore } from './core/storage/store'
+import { LibraryService } from './core/storage/library'
 import { registerIpc } from './ipc'
 import { createWindow } from './window'
 
@@ -142,6 +143,8 @@ async function bootstrap(): Promise<void> {
   const search = new SearchEngine({ sources, onLog: log })
   const resolver = new MusicResolver({ sources, proxy, onLog: log })
   const downloads = new DownloadManager({ resolver, configStore, onLog: log })
+  // 音乐库：喜欢 / 历史 / 歌单统一落在用户数据目录
+  const library = new LibraryService(join(userData, 'library.json'))
 
   /* --------------------------- 4. IPC --------------------------- */
   registerIpc({
@@ -149,6 +152,7 @@ async function bootstrap(): Promise<void> {
     search,
     resolver,
     downloads,
+    library,
     proxy,
     sourceDir,
     downloadDir: configStore.get().dir
@@ -172,6 +176,7 @@ async function bootstrap(): Promise<void> {
   app.on('before-quit', () => {
     downloads.dispose()
     sources.dispose()
+    library.dispose()
     void proxy.stop()
   })
 }

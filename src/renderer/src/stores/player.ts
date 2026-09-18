@@ -9,6 +9,7 @@ import { computed, ref } from 'vue'
 import type { Lyric, MusicUrlResult, Quality, Song } from '@shared/types/music'
 import { cleanIpcError, findLyricIndex, parseLrc, type LyricLine } from '../utils/format'
 import { getLyric as fetchLyric, getPlayUrl } from '../utils/ipc'
+import { useLibraryStore } from './library'
 
 /** 播放模式 */
 export type PlayMode = 'order' | 'loop' | 'single' | 'shuffle'
@@ -25,7 +26,12 @@ export const usePlayerStore = defineStore('player', () => {
   const error = ref<string | null>(null)
 
   const currentTime = ref(0)
-  const duration = ref(0)
+  /**
+   * 音频元素上报的时长。
+   * 很多音源的流不带 Content-Length，此时 el.duration 会是 NaN 或 Infinity，
+   * 因此不能直接拿它当时长用。
+   */
+  const mediaDuration = ref(0)
   const volume = ref(0.8)
 
   const quality = ref<Quality>('320k')
@@ -40,6 +46,19 @@ export const usePlayerStore = defineStore('player', () => {
   let audio: HTMLAudioElement | null = null
 
   /* ------------------------------ 派生 ------------------------------ */
+
+  /**
+   * 进度计算用的时长。
+   *
+   * 优先用音频元素上报的值；拿不到就退回歌曲元数据里的时长。
+   * 之前「进度条不走」的根因就在这里：音源不上报时长时，
+   * durationchange 会把时长覆盖成 0，进度于是永远停在 0%。
+   */
+  const duration = computed(() => {
+    const media = mediaDuration.value
+    if (Number.isFinite(media) && media > 0) return media
+    return current.value?.duration ?? 0
+  })
 
   const progress = computed(() =>
     duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0
@@ -58,12 +77,24 @@ export const usePlayerStore = defineStore('player', () => {
     el.preload = 'auto'
     el.volume = volume.value
 
+    /**
+     * 同步时长。
+     * 关键：只有拿到有效值才写入 —— 之前这里会把 NaN / Infinity 直接写成 0，
+     * 导致进度条永远停在起点。
+     */
+    const syncDuration = (): void => {
+      const value = el.duration
+      if (Number.isFinite(value) && value > 0) mediaDuration.value = value
+    }
+
     el.addEventListener('timeupdate', () => {
       currentTime.value = el.currentTime
+      // 顺带兜底：有些音源要播一会儿才报出真实时长
+      syncDuration()
     })
-    el.addEventListener('durationchange', () => {
-      duration.value = Number.isFinite(el.duration) ? el.duration : 0
-    })
+    el.addEventListener('loadedmetadata', syncDuration)
+    el.addEventListener('durationchange', syncDuration)
+    el.addEventListener('progress', syncDuration)
     el.addEventListener('play', () => {
       playing.value = true
     })
@@ -104,7 +135,8 @@ export const usePlayerStore = defineStore('player', () => {
     lyricLines.value = []
     lyricRaw.value = null
     currentTime.value = 0
-    duration.value = song.duration || 0
+    // 重置音频上报的时长，真实值会在加载与播放过程中补上
+    mediaDuration.value = 0
 
     try {
       const result = await getPlayUrl({ song, quality: quality.value })
@@ -118,6 +150,10 @@ export const usePlayerStore = defineStore('player', () => {
 
       // 歌词是锦上添花，失败了不打扰用户
       void loadLyric(song)
+      // 记录播放历史；写库失败绝不该影响播放本身
+      void useLibraryStore()
+        .recordPlay(song)
+        .catch(() => undefined)
     } catch (err) {
       error.value = cleanIpcError(err)
       playing.value = false

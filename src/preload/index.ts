@@ -83,6 +83,24 @@ const api = {
     showInFolder: (path: string) => invoke(CH.downloadShowInFolder, path)
   },
 
+  /* ------------------------------ 音乐库 ------------------------------ */
+  /**
+   * 我的喜欢 / 历史播放 / 歌单。
+   * 注意：涉及歌曲对象的方法，渲染层必须先把对象解包成纯数据
+   * （见 renderer/src/utils/ipc.ts 的说明），这里不代劳。
+   */
+  library: {
+    snapshot: () => invoke(CH.librarySnapshot),
+    stats: () => invoke(CH.libraryStats),
+    toggleFavorite: (song: Song) => invoke(CH.libraryToggleFavorite, song),
+    clearFavorites: () => invoke(CH.libraryClearFavorites),
+    recordPlay: (song: Song) => invoke(CH.libraryRecordPlay, song),
+    removeHistory: (songIds: string[]) => invoke(CH.libraryRemoveHistory, songIds),
+    clearHistory: () => invoke(CH.libraryClearHistory),
+    playlist: (action: import('@shared/types/library').PlaylistAction) =>
+      invoke(CH.libraryPlaylist, action)
+  },
+
   /* ------------------------------ 应用 ------------------------------ */
   app: {
     info: () => invoke(CH.appInfo) as Promise<AppInfo>,

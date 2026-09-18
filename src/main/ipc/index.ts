@@ -28,6 +28,8 @@ export interface IpcContext {
   resolver: MusicResolver
   downloads: DownloadManager
   proxy: StreamProxy
+  /** 本地音乐库（我的喜欢 / 历史播放 / 歌单） */
+  library: import('@main/core/storage/library').LibraryService
   /** 音源目录 */
   sourceDir: string
   /** 默认下载目录 */
@@ -135,6 +137,31 @@ export function registerIpc(ctx: IpcContext): void {
     if (!existsSync(path)) throw new Error('文件不存在或已被移动')
     shell.showItemInFolder(path)
   })
+
+  /* ------------------------------ 音乐库 ------------------------------ */
+
+  ipcMain.handle(CH.librarySnapshot, () => ctx.library.snapshot())
+
+  ipcMain.handle(CH.libraryStats, () => ctx.library.stats())
+
+  ipcMain.handle(CH.libraryToggleFavorite, (_e, song: Song) =>
+    ctx.library.toggleFavorite(song)
+  )
+
+  ipcMain.handle(CH.libraryClearFavorites, () => ctx.library.clearFavorites())
+
+  ipcMain.handle(CH.libraryRecordPlay, (_e, song: Song) => ctx.library.recordPlay(song))
+
+  ipcMain.handle(CH.libraryRemoveHistory, (_e, songIds: string[]) =>
+    ctx.library.removeHistory(songIds)
+  )
+
+  ipcMain.handle(CH.libraryClearHistory, () => ctx.library.clearHistory())
+
+  ipcMain.handle(
+    CH.libraryPlaylist,
+    (_e, action: import('@shared/types/library').PlaylistAction) => ctx.library.playlist(action)
+  )
 
   /* ------------------------------ 应用 ------------------------------ */
 

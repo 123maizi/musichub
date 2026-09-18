@@ -5,14 +5,17 @@ import { useRoute, useRouter } from 'vue-router'
 import PlayerBar from './components/PlayerBar.vue'
 import { useSourceStore } from './stores/sources'
 import { useDownloadStore } from './stores/downloads'
+import { useLibraryStore } from './stores/library'
 
 const route = useRoute()
 const router = useRouter()
 const sources = useSourceStore()
 const downloads = useDownloadStore()
+const library = useLibraryStore()
 
 const navItems = [
   { name: 'search', path: '/search', label: '搜索', hint: '搜歌 · 试听 · 下载' },
+  { name: 'library', path: '/library', label: '我的', hint: '喜欢 · 历史 · 歌单' },
   { name: 'downloads', path: '/downloads', label: '下载', hint: '任务 · 文件' },
   { name: 'sources', path: '/sources', label: '音源', hint: '导入 · 启停 · 诊断' },
   { name: 'settings', path: '/settings', label: '设置', hint: '播放 · 下载偏好' }
@@ -25,6 +28,7 @@ onMounted(async () => {
   await sources.refresh()
   await downloads.loadConfig()
   await downloads.refresh()
+  await library.refresh()
   offSource = sources.bind()
   offDownload = downloads.bind()
 })
@@ -75,6 +79,10 @@ function go(path: string): void {
         <div class="stat-row">
           <span class="faint">覆盖平台</span>
           <span class="mono">{{ sources.coveredPlatforms.length }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="faint">我的收藏</span>
+          <span class="mono">{{ library.stats.favorites }}</span>
         </div>
         <div v-if="downloads.activeTasks.length > 0" class="stat-row">
           <span class="faint">下载中</span>

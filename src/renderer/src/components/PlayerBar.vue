@@ -2,11 +2,24 @@
 import { computed, ref } from 'vue'
 import { usePlayerStore } from '../stores/player'
 import { useDownloadStore } from '../stores/downloads'
+import { useLibraryStore } from '../stores/library'
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
 import { formatTime } from '../utils/format'
 
 const player = usePlayerStore()
 const downloads = useDownloadStore()
+const library = useLibraryStore()
+
+/** 当前歌曲是否已收藏（播放条上的心形） */
+const isCurrentFavorite = computed(() =>
+  player.current ? library.isFavorite(player.current.id) : false
+)
+
+async function toggleFavorite(): Promise<void> {
+  const song = player.current
+  if (!song) return
+  await library.toggleFavorite(song)
+}
 
 const seeking = ref(false)
 const seekValue = ref(0)
@@ -130,6 +143,16 @@ async function downloadCurrent(): Promise<void> {
         <span v-if="player.urlInfo" class="src-name ellipsis" :title="player.urlInfo.sourceName">
           {{ player.urlInfo.sourceName }}
         </span>
+
+        <button
+          class="ghost small"
+          :class="{ liked: isCurrentFavorite }"
+          :disabled="!player.current"
+          :title="isCurrentFavorite ? '取消收藏' : '收藏到我的喜欢'"
+          @click="toggleFavorite"
+        >
+          {{ isCurrentFavorite ? '♥' : '♡' }}
+        </button>
 
         <button
           class="ghost small"
@@ -331,6 +354,11 @@ async function downloadCurrent(): Promise<void> {
 .small {
   font-size: 12px;
   padding: 4px 9px;
+}
+
+/* 已收藏：心形点亮 */
+.liked {
+  color: var(--accent);
 }
 
 .src-name {

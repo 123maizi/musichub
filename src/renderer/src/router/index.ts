@@ -19,6 +19,11 @@ export default createRouter({
       component: () => import('../views/DownloadView.vue')
     },
     {
+      path: '/library',
+      name: 'library',
+      component: () => import('../views/LibraryView.vue')
+    },
+    {
       path: '/sources',
       name: 'sources',
       component: () => import('../views/SourceView.vue')

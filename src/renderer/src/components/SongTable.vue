@@ -2,6 +2,7 @@
 import type { Song } from '@shared/types/music'
 import { PLATFORM_META, QUALITY_META, qualityRank } from '@shared/constants'
 import { formatTime } from '../utils/format'
+import { useLibraryStore } from '../stores/library'
 
 withDefaults(
   defineProps<{
@@ -12,12 +13,15 @@ withDefaults(
     showPlatform?: boolean
     /** 当前正在播放的歌曲 id，用于高亮 */
     currentId?: string
+    /** 是否允许从当前列表移除（歌单视图用） */
+    removable?: boolean
   }>(),
   {
     loading: false,
     emptyText: '暂无歌曲',
     showPlatform: true,
-    currentId: ''
+    currentId: '',
+    removable: false
   }
 )
 
@@ -25,7 +29,19 @@ const emit = defineEmits<{
   play: [song: Song]
   download: [song: Song]
   queue: [song: Song]
+  remove: [song: Song]
 }>()
+
+// 收藏状态直接读音乐库，省得往每一层传 props
+const library = useLibraryStore()
+
+function isFavorite(song: Song): boolean {
+  return library.isFavorite(song.id)
+}
+
+async function toggleFavorite(song: Song): Promise<void> {
+  await library.toggleFavorite(song)
+}
 
 /** 取该曲目可用的最高音质标签 */
 function bestQuality(song: Song): string {
@@ -93,8 +109,24 @@ function isLossless(song: Song): boolean {
 
         <span class="col-actions">
           <button class="ghost tiny" title="播放" @click.stop="emit('play', song)">▶</button>
+          <button
+            class="ghost tiny"
+            :class="{ liked: isFavorite(song) }"
+            :title="isFavorite(song) ? '取消收藏' : '收藏到我的喜欢'"
+            @click.stop="toggleFavorite(song)"
+          >
+            {{ isFavorite(song) ? '♥' : '♡' }}
+          </button>
           <button class="ghost tiny" title="加入播放队列" @click.stop="emit('queue', song)">＋</button>
           <button class="ghost tiny" title="下载" @click.stop="emit('download', song)">↓</button>
+          <button
+            v-if="removable"
+            class="ghost tiny danger"
+            title="从当前列表移除"
+            @click.stop="emit('remove', song)"
+          >
+            ✕
+          </button>
         </span>
       </div>
     </div>
@@ -112,7 +144,8 @@ function isLossless(song: Song): boolean {
 .head,
 .row {
   display: grid;
-  grid-template-columns: 36px minmax(160px, 1.4fr) 56px minmax(100px, 1fr) 62px 52px 92px;
+  /* 操作列按最宽的情况留位：播放 / 收藏 / 队列 / 下载 / 移除 */
+  grid-template-columns: 36px minmax(160px, 1.4fr) 56px minmax(100px, 1fr) 62px 52px 142px;
   align-items: center;
   gap: 12px;
   padding: 0 14px;
@@ -120,7 +153,12 @@ function isLossless(song: Song): boolean {
 
 .head.no-platform,
 .row.no-platform {
-  grid-template-columns: 36px minmax(160px, 1.4fr) minmax(100px, 1fr) 62px 52px 92px;
+  grid-template-columns: 36px minmax(160px, 1.4fr) minmax(100px, 1fr) 62px 52px 142px;
+}
+
+/* 已收藏：心形用强调色点亮 */
+.liked {
+  color: var(--accent);
 }
 
 .head {

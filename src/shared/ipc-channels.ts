@@ -38,6 +38,15 @@ export const CH = {
   downloadChooseDir: 'download:chooseDir',
   downloadOpenFile: 'download:openFile',
   downloadShowInFolder: 'download:showInFolder',
+  // 音乐库（我的喜欢 / 历史播放 / 歌单）
+  librarySnapshot: 'library:snapshot',
+  libraryStats: 'library:stats',
+  libraryToggleFavorite: 'library:toggleFavorite',
+  libraryClearFavorites: 'library:clearFavorites',
+  libraryRecordPlay: 'library:recordPlay',
+  libraryRemoveHistory: 'library:removeHistory',
+  libraryClearHistory: 'library:clearHistory',
+  libraryPlaylist: 'library:playlist',
   // 应用
   appInfo: 'app:info',
   appOpenExternal: 'app:openExternal',
