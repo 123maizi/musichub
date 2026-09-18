@@ -59,6 +59,11 @@ const api = {
     artists: (keyword: string, platforms?: string[]) =>
       invoke(CH.searchArtists, keyword, platforms) as Promise<
         import('@shared/types/artist').ArtistSearchResponse
+      >,
+    /** 专辑搜索：返回各平台各自的专辑列表 */
+    albums: (keyword: string, platforms?: string[]) =>
+      invoke(CH.searchAlbums, keyword, platforms) as Promise<
+        import('@shared/types/album').AlbumSearchResponse
       >
   },
 

@@ -88,6 +88,11 @@ export function registerIpc(ctx: IpcContext): void {
     search.searchArtists(keyword, platforms)
   )
 
+  // 专辑搜索：同样独立
+  ipcMain.handle(CH.searchAlbums, (_e, keyword: string, platforms?: string[]) =>
+    search.searchAlbums(keyword, platforms)
+  )
+
   /* ------------------------------ 播放 ------------------------------ */
 
   ipcMain.handle(CH.playGetUrl, (_e, req: MusicUrlRequest) => resolver.resolve(req))

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { PLATFORM_META } from '@shared/constants'
 import type { Song } from '@shared/types/music'
 import SongTable from '../components/SongTable.vue'
+import { useAlbumStore, type AlbumInfo } from '../stores/album'
 import { useArtistStore, type ArtistInfo } from '../stores/artist'
 import { useSearchStore } from '../stores/search'
 import { usePlayerStore } from '../stores/player'
@@ -13,15 +14,16 @@ import { useSourceStore } from '../stores/sources'
 const router = useRouter()
 const search = useSearchStore()
 const artistStore = useArtistStore()
+const albumStore = useAlbumStore()
 const player = usePlayerStore()
 const downloads = useDownloadStore()
 const sources = useSourceStore()
 
-/** 搜索模式：歌曲 / 歌手 */
-const mode = ref<'song' | 'artist'>('song')
+/** 搜索模式：歌曲 / 歌手 / 专辑 —— 三条相互独立的链路 */
+const mode = ref<'song' | 'artist' | 'album'>('song')
 
 /** 切模式后如果输入框已有内容，顺手搜一次，省得用户再按回车 */
-function switchMode(next: 'song' | 'artist'): void {
+function switchMode(next: 'song' | 'artist' | 'album'): void {
   if (mode.value === next) return
   mode.value = next
   if (search.keyword.trim()) runSearch()
@@ -31,6 +33,14 @@ function switchMode(next: 'song' | 'artist'): void {
 function openArtist(artist: ArtistInfo): void {
   artistStore.select(artist)
   void router.push('/artist')
+}
+
+/** 点专辑卡片 → 直接带着专辑信息进专辑页（专辑页从 query 读取） */
+function openAlbum(album: AlbumInfo): void {
+  void router.push({
+    path: '/album',
+    query: { name: album.name, singer: album.singer, platform: album.platform }
+  })
 }
 
 const inputEl = ref<HTMLInputElement | null>(null)
@@ -43,9 +53,11 @@ onMounted(() => {
 })
 
 function runSearch(): void {
-  // 两条链路完全独立：歌曲搜索走 search store，歌手搜索走 artist store
+  // 三条链路完全独立：歌曲 / 歌手 / 专辑 各走各的 store
   if (mode.value === 'artist') {
     void artistStore.search(search.keyword)
+  } else if (mode.value === 'album') {
+    void albumStore.search(search.keyword)
   } else {
     void search.search()
   }
@@ -133,13 +145,16 @@ async function downloadSelected(): Promise<void> {
       </div>
 
       <div class="meta-row">
-        <!-- 搜索模式：歌曲 / 歌手 -->
+        <!-- 搜索模式：歌曲 / 歌手 / 专辑 -->
         <div class="channels">
           <button class="ghost small" :class="{ active: mode === 'song' }" @click="switchMode('song')">
             歌曲
           </button>
           <button class="ghost small" :class="{ active: mode === 'artist' }" @click="switchMode('artist')">
             歌手
+          </button>
+          <button class="ghost small" :class="{ active: mode === 'album' }" @click="switchMode('album')">
+            专辑
           </button>
         </div>
 
@@ -194,9 +209,15 @@ async function downloadSelected(): Promise<void> {
           </button>
         </template>
 
-        <template v-else>
+        <template v-else-if="mode === 'artist'">
           <span v-if="artistStore.total > 0" class="faint small-text">
             {{ artistStore.total }} 位艺人 · 耗时 {{ artistStore.cost }}ms
+          </span>
+        </template>
+
+        <template v-else>
+          <span v-if="albumStore.total > 0" class="faint small-text">
+            {{ albumStore.total }} 张专辑 · 耗时 {{ albumStore.cost }}ms
           </span>
         </template>
       </div>
@@ -257,7 +278,7 @@ async function downloadSelected(): Promise<void> {
       />
 
       <!-- 歌手模式 -->
-      <div v-else class="artists">
+      <div v-else-if="mode === 'artist'" class="artists">
         <div v-if="artistStore.loading" class="empty">
           <span class="mono">正在检索艺人…</span>
         </div>
@@ -281,6 +302,36 @@ async function downloadSelected(): Promise<void> {
             <div class="artist-meta">
               <span class="tag">{{ PLATFORM_META[artist.platform]?.short ?? artist.platform }}</span>
               <span v-if="artist.songCount" class="faint">{{ artist.songCount }} 首</span>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- 专辑模式 -->
+      <div v-else class="artists">
+        <div v-if="albumStore.loading" class="empty">
+          <span class="mono">正在检索专辑…</span>
+        </div>
+
+        <div v-else-if="albumStore.allAlbums.length === 0" class="empty">
+          <span>{{ albumStore.error || '输入专辑名开始搜索' }}</span>
+        </div>
+
+        <div v-else class="artist-grid">
+          <button
+            v-for="album in albumStore.allAlbums"
+            :key="album.id"
+            class="artist-card"
+            :title="`查看专辑「${album.name}」的曲目`"
+            @click="openAlbum(album)"
+          >
+            <div class="album-cover">
+              <CoverImage :src="album.picUrl" :icon-size="28" />
+            </div>
+            <div class="artist-name ellipsis">{{ album.name }}</div>
+            <div class="artist-meta">
+              <span class="tag">{{ PLATFORM_META[album.platform]?.short ?? album.platform }}</span>
+              <span v-if="album.songCount" class="faint">{{ album.songCount }} 首</span>
             </div>
           </button>
         </div>
@@ -495,6 +546,19 @@ async function downloadSelected(): Promise<void> {
   width: 76px;
   height: 76px;
   border-radius: 50%;
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+}
+
+/* 专辑封面用方形，与艺人的圆形一眼区分开 */
+.album-cover {
+  width: 76px;
+  height: 76px;
+  border-radius: 8px;
   overflow: hidden;
   background: var(--bg-elev);
   border: 1px solid var(--line);

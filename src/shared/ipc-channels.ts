@@ -23,6 +23,8 @@ export const CH = {
   searchProviders: 'search:providers',
   /** 艺人（歌手）搜索 */
   searchArtists: 'search:artists',
+  /** 专辑搜索 */
+  searchAlbums: 'search:albums',
   // 播放
   playGetUrl: 'play:getUrl',
   playGetLyric: 'play:getLyric',

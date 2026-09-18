@@ -20,6 +20,9 @@ import { builtinProviders, type ProviderSearchResult, type SearchProvider } from
 // 艺人搜索是独立模块（接口结构完全不同），单独引入，刻意不动已经稳定的 builtin
 import { artistSearchers, ARTIST_PLATFORM_NAMES } from './artist'
 import type { ArtistInfo, ArtistSearchResponse, PlatformArtistResult } from '@shared/types/artist'
+// 专辑搜索同样是独立模块：接口结构与歌曲搜索完全不同
+import { albumSearchers, ALBUM_PLATFORM_NAMES } from './album'
+import type { AlbumSearchResponse, PlatformAlbumResult } from '@shared/types/album'
 
 export interface SearchEngineDeps {
   sources: SourceManager
@@ -125,6 +128,71 @@ export class SearchEngine {
     }
     // 有头像通常意味着平台收录更完整，轻微加分
     if (artist.picUrl) score += 5
+
+    return score
+  }
+
+  /* ------------------------------ 专辑搜索 ------------------------------ */
+
+  /**
+   * 专辑搜索：四个平台并发。
+   * （QQ 那个 t=2 接口的响应里已不再包含专辑列表，故未接入。）
+   */
+  async searchAlbums(keyword: string, platforms?: string[]): Promise<AlbumSearchResponse> {
+    const started = Date.now()
+    const kw = (keyword ?? '').trim()
+    if (!kw) return { keyword: kw, platforms: [], cost: 0 }
+
+    const wanted = platforms && platforms.length > 0 ? new Set(platforms) : null
+    const targets = Object.entries(albumSearchers).filter(([id]) => !wanted || wanted.has(id))
+
+    const settled: PlatformAlbumResult[] = await Promise.all(
+      targets.map(async ([id, searcher]): Promise<PlatformAlbumResult> => {
+        const t0 = Date.now()
+        const providerName = ALBUM_PLATFORM_NAMES[id] ?? id
+        try {
+          const albums = await searcher(kw, 1, 15)
+          return { platform: id, providerId: id, providerName, albums, cost: Date.now() - t0 }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          this.deps.onLog?.('warn', 'search', `专辑搜索失败 ${providerName}: ${message}`)
+          return {
+            platform: id,
+            providerId: id,
+            providerName,
+            albums: [],
+            cost: Date.now() - t0,
+            error: message
+          }
+        }
+      })
+    )
+
+    // 专辑名完全匹配的排前面，其次曲目多的（通常意味着正式专辑而非单曲）
+    for (const group of settled) {
+      group.albums = group.albums
+        .map((album, index) => ({ album, index, score: this.scoreAlbum(album, kw) }))
+        .sort((a, b) => b.score - a.score || a.index - b.index)
+        .map((item) => item.album)
+    }
+
+    return { keyword: kw, platforms: settled, cost: Date.now() - started }
+  }
+
+  /** 专辑排序打分：同名优先，其次看曲目数 */
+  private scoreAlbum(album: PlatformAlbumResult['albums'][number], keyword: string): number {
+    const kw = keyword.trim().toLowerCase()
+    const name = album.name.toLowerCase()
+    let score = 0
+
+    if (name === kw) score += 100
+    else if (name.includes(kw)) score += 40
+
+    if (album.songCount && album.songCount > 0) {
+      score += Math.min(Math.log10(album.songCount) * 25, 50)
+    }
+    if (album.picUrl) score += 8
+    if (album.singer) score += 5
 
     return score
   }
