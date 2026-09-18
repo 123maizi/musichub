@@ -51,9 +51,27 @@ function num(value: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback
 }
 
-/** 清掉搜索结果里的高亮标签与 HTML 实体 */
+/**
+ * 解开被反斜杠转义的 Unicode 转义序列。
+ *
+ * 酷我的 r.s 接口把 `&` 写成 `\\\\u0026`（四个反斜杠＋u0026，实测如此），
+ * 宽松解析把这段原样带了出来 —— 于是歌手名在界面上显示成
+ * 「Ye (侃爷)\u0026Beyoncé\u0026Charlie Wilson」，而按这个名字去搜艺人当然搜不到。
+ *
+ * 为什么要用 `\\+` 而不是 `\\`：反斜杠的层数是接口自己决定的，
+ * 今天四个、明天可能两个，统一按「一串反斜杠 + uXXXX」来处理，
+ * 无论几层都能一次剥干净，也不会误伤普通文本里的单斜杠。
+ */
+function decodeUnicodeEscapes(input: string): string {
+  if (!input.includes('\\')) return input
+  return input.replace(/\\+u([0-9a-fA-F]{4})/g, (_, hex: string) =>
+    String.fromCharCode(parseInt(hex, 16))
+  )
+}
+
+/** 清掉搜索结果里的高亮标签、HTML 实体与 Unicode 转义 */
 function cleanText(input: string): string {
-  return input
+  return decodeUnicodeEscapes(input)
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')

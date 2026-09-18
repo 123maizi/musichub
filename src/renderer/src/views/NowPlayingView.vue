@@ -10,15 +10,18 @@ import { useRouter } from 'vue-router'
 
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
 import AppIcon from '../components/AppIcon.vue'
+import { useArtistStore } from '../stores/artist'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
-import { formatTime } from '../utils/format'
+import { bigCoverUrl } from '../utils/cover'
+import { cleanIpcError, formatTime } from '../utils/format'
 
 const router = useRouter()
 const player = usePlayerStore()
 const library = useLibraryStore()
 const downloads = useDownloadStore()
+const artistStore = useArtistStore()
 
 const lyricBox = ref<HTMLElement | null>(null)
 const toast = ref<string | null>(null)
@@ -71,6 +74,97 @@ const translateTitle = computed(() =>
 async function onTranslate(): Promise<void> {
   const ok = await player.translateCurrentLyric()
   if (!ok && player.translateError) toast.value = player.translateError
+}
+
+/* ------------------------------ 歌手 / 专辑跳转 ------------------------------ */
+
+/** 大图要 500px 的，列表里用 120px 的省流量 */
+const bigCover = computed(() => bigCoverUrl(player.current?.picUrl))
+
+const openingArtist = ref(false)
+
+/**
+ * 拆出可能的歌手名候选。
+ *
+ * 一首歌的歌手字段常常挤着好几位：酷我用 `&` 拼，QQ 用 `/` 拼，各平台
+ * 还用 `、`。但这里刻意「先整串、再逐段」—— 因为有些艺人名字本身就带
+ * 分隔符（Tyler, The Creator 带逗号，AC/DC 带斜杠），一上来就拆会把人拆坏。
+ * 整串能精确命中就不拆，命中不了才退而求其次。
+ */
+function artistCandidates(raw: string): string[] {
+  const out: string[] = []
+  const push = (value: string): void => {
+    const name = value.trim()
+    if (name && !out.includes(name)) out.push(name)
+  }
+  push(raw)
+  raw.split(/[&、/]/).forEach(push)
+  return out.slice(0, 3)
+}
+
+const artistTitle = computed(() => {
+  const singer = player.current?.singer
+  return singer ? `查看「${singer}」的艺人页` : ''
+})
+
+async function openArtistPage(): Promise<void> {
+  const song = player.current
+  if (!song || openingArtist.value) return
+
+  const raw = (song.singer ?? '').trim()
+  if (!raw) return
+
+  openingArtist.value = true
+  try {
+    const names = artistCandidates(raw)
+    let picked = null as (typeof artistStore.allArtists)[number] | null
+
+    // 只认「名字完全一致」的结果 —— 多歌手拼成的名字拿去搜，
+    // 首条结果十有八九是别人，直接取会开错主页。
+    // 比较时忽略大小写与空白：搜索接口返回的大小写未必和歌曲信息一致
+    const same = (a: string, b: string): boolean =>
+      a.replace(/\s+/g, '').toLowerCase() === b.replace(/\s+/g, '').toLowerCase()
+
+    for (const name of names) {
+      await artistStore.search(name)
+      const exact = artistStore.allArtists.find((a) => same(a.name, name))
+      if (exact) {
+        picked = exact
+        break
+      }
+    }
+
+    if (!picked) {
+      // 没有完全一致的，退回第一段（通常是主唱）并如实说明是「最接近的」
+      const fallbackName = names[1] ?? raw
+      await artistStore.search(fallbackName)
+      picked = artistStore.allArtists[0] ?? null
+      if (picked) toast.value = `没找到完全一致的艺人，先打开最接近的「${picked.name}」`
+    }
+
+    if (!picked) {
+      toast.value = `没搜到艺人「${names[0] ?? raw}」`
+      return
+    }
+
+    artistStore.select(picked)
+    void router.push('/artist')
+  } catch (err) {
+    toast.value = cleanIpcError(err)
+  } finally {
+    openingArtist.value = false
+  }
+}
+
+/** 点专辑名 → 专辑页（专辑页直接从 query 读，不需要先请求） */
+function openAlbumPage(): void {
+  const song = player.current
+  const name = (song?.albumName ?? '').trim()
+  if (!song || !name) return
+  void router.push({
+    path: '/album',
+    query: { name, singer: song.singer, platform: song.platform }
+  })
 }
 
 /* ------------------------------ 进度条 ------------------------------ */
@@ -163,9 +257,10 @@ function queueCurrent(): void {
       <div class="left">
         <div class="cover">
           <CoverImage
-            :src="player.current?.picUrl"
+            :src="bigCover"
             :song="player.current ?? undefined"
             :icon-size="56"
+            prefer-resolved
             fallback
           />
         </div>
@@ -174,13 +269,25 @@ function queueCurrent(): void {
           <h1 class="ellipsis" :title="player.current?.name">
             {{ player.current?.name ?? '未在播放' }}
           </h1>
-          <div class="sub ellipsis">
-            <span>{{ player.current?.singer ?? '—' }}</span>
+          <div class="sub">
+            <button
+              class="jump"
+              :disabled="!player.current || openingArtist"
+              :title="artistTitle"
+              @click="openArtistPage"
+            >
+              <span class="ellipsis">{{ player.current?.singer ?? '—' }}</span>
+            </button>
             <span v-if="player.current" class="faint"> · {{ platformName }}</span>
           </div>
-          <div v-if="player.current?.albumName" class="album faint ellipsis">
-            {{ player.current.albumName }}
-          </div>
+          <button
+            v-if="player.current?.albumName"
+            class="jump album faint"
+            :title="`查看专辑「${player.current.albumName}」`"
+            @click="openAlbumPage"
+          >
+            <span class="ellipsis">{{ player.current.albumName }}</span>
+          </button>
         </div>
 
         <div class="tools">
@@ -394,12 +501,47 @@ function queueCurrent(): void {
 }
 
 .sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
   font-size: 13px;
   color: var(--text-dim);
 }
 
 .album {
   font-size: 12px;
+}
+
+/* 可点的歌手 / 专辑：长得像文字，点上去才亮出来 —— 免得满屏都是按钮 */
+.jump {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 6px;
+  margin-left: -6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.16s, background 0.16s;
+}
+
+.sub .jump {
+  color: var(--text);
+}
+
+.jump:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.jump:disabled {
+  cursor: default;
+  opacity: 0.7;
 }
 
 /* ------------------------------ 工具胶囊 ------------------------------ */

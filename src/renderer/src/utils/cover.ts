@@ -66,3 +66,19 @@ export async function resolveCoverThrottled(song: Song): Promise<string | null> 
 export function coverCacheSize(): number {
   return cache.size
 }
+
+/**
+ * 把列表用的小图地址，换成大图地址。
+ *
+ * 酷我的封面地址形如 `.../star/albumcover/120/xx/yy/123.jpg`，
+ * 开头那个 `120` 就是尺寸（实测 120/300/500/1000 都认，分别约
+ * 2.6KB / 14KB / 52KB / 263KB）。列表里用 120 省流量，
+ * 到了正在播放页那种大图上再要 500，不然就是拿 120px 硬撑 320px。
+ *
+ * 注意：它换的只是尺寸，换不出内容 —— 有些专辑酷我压根没给真封面
+ * （它用一张「红底＋中间一张小图」的占位图顶上），这种只能靠别家补图。
+ */
+export function bigCoverUrl(url?: string): string | undefined {
+  if (!url) return url
+  return url.replace(/(\/star\/albumcover\/)\d+(\/)/, '$1500$2')
+}

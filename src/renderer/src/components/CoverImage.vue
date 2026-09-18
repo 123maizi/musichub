@@ -27,6 +27,15 @@ const props = withDefaults(
     iconSize?: number
     /** 缺图时是否跨平台补一张（仅建议用于单张大图场景） */
     fallback?: boolean
+    /**
+     * 是否优先用跨平台补来的封面（大图场景）。
+     *
+     * 为什么需要：平台自己的封面未必能用 —— 酷我有些专辑压根没给真封面，
+     * 而是塞一张「红底＋中间一张小图」的占位图，从 120px 要到 1000px
+     * 都是同一张；这类封面上大图会非常难看。
+     * 补不到就继续用平台那张，所以最坏情况与不放这个开关时一致。
+     */
+    preferResolved?: boolean
     /** 补图需要的歌曲信息 */
     song?: Song
   }>(),
@@ -35,6 +44,7 @@ const props = withDefaults(
     alt: '',
     iconSize: 22,
     fallback: false,
+    preferResolved: false,
     song: undefined
   }
 )
@@ -42,18 +52,24 @@ const props = withDefaults(
 const failed = ref(false)
 const resolved = ref('')
 const loading = ref(false)
+/** 是否已经补过一次图；防止「补来的图挂了 → 再补 → 又挂」打成死循环 */
+const tried = ref(false)
 
-/** 最终使用的地址：优先平台给的，其次补全来的 */
-const finalSrc = computed(() => props.src || resolved.value)
+/** 最终使用的地址：要看补图结果的就优先用补来的 */
+const finalSrc = computed(() => {
+  if (props.preferResolved && resolved.value) return resolved.value
+  return props.src || resolved.value
+})
 
 /**
  * 尝试补一张封面。
- * 只在「开了补图、有歌曲信息、平台又没给地址」时才动手。
+ * 三种情况会动手：开了补图、有歌曲信息，且（平台没给地址 或 要求优先用补图）。
  */
 async function tryFallback(): Promise<void> {
-  if (!props.fallback || !props.song || props.src || loading.value) return
-  if (resolved.value) return
+  if (!props.fallback || !props.song || loading.value || tried.value) return
+  if (!props.preferResolved && props.src) return
 
+  tried.value = true
   loading.value = true
   try {
     const url = await resolveCover(props.song)
@@ -78,14 +94,21 @@ watch(
   () => {
     failed.value = false
     resolved.value = ''
+    tried.value = false
     void tryFallback()
   },
   { immediate: true }
 )
 
-/** 平台给了地址但图片加载失败时，也去补一张 */
+/** 当前显示的图加载失败：补来的挂了就退回平台那张，平台那张挂了才去补 */
 watch(failed, (isFailed) => {
-  if (isFailed) void tryFallback()
+  if (!isFailed) return
+  if (props.preferResolved && resolved.value) {
+    resolved.value = ''
+    failed.value = false
+    return
+  }
+  void tryFallback()
 })
 </script>
 

@@ -317,6 +317,20 @@ export class MusicResolver {
           .then((raw) => {
             const cost = Date.now() - started
             const normalized = normalizeUrlResult(raw)
+
+            // 地址得先像个地址。
+            // 实测有音源拿不到资源时会把 Python 的 None 拼进查询串返回，
+            // 形如 "None?from=xxx_api" —— 这种字符串非空、看着「成功」，
+            // 一路传到 <audio> 才炸成「no supported source was found」，
+            // 把责任推给了播放器。在这里拦下来，按失败处理并换下一个源。
+            const url = String(normalized?.url ?? '').trim()
+            if (!isPlayableUrl(url)) {
+              const reason = url
+                ? `音源返回的地址不是有效链接：${url.slice(0, 80)}`
+                : '音源没有返回播放地址'
+              throw new Error(reason)
+            }
+
             attempts.push({
               sourceId: src.id,
               sourceName: src.info.name,
@@ -492,6 +506,23 @@ export function toMusicInfo(song: Song): Record<string, unknown> {
   }
 
   return base
+}
+
+/**
+ * 这个地址真的能播吗？
+ *
+ * 只放行三种形态：http(s) 链接、file 链接、绝对路径（本地音乐源会给路径）。
+ * 其余一律当失败 —— 尤其是「拿不到资源时把空值拼进查询串」的那类返回值，
+ * 例如 Python 风格的 `None?from=xxx_api`：它非空、看起来像成功，
+ * 一直传到播放器才炸，用户看到的却是播放器在报错。
+ */
+function isPlayableUrl(url: string): boolean {
+  if (!url) return false
+  if (/^https?:\/\//i.test(url)) return true
+  if (/^file:\/\//i.test(url)) return true
+  // Windows 绝对路径（C:\...）或 POSIX 绝对路径
+  if (/^[a-zA-Z]:[\\/]/.test(url)) return true
+  return false
 }
 
 /** 规范化音源返回的地址形态 */
