@@ -8,7 +8,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Lyric, MusicUrlResult, Quality, Song } from '@shared/types/music'
 import { cleanIpcError, findLyricIndex, parseLrc, type LyricLine } from '../utils/format'
-import { getLyric as fetchLyric, getPlayUrl } from '../utils/ipc'
+import { getLyric as fetchLyric, getPlayUrl, reportBadSource } from '../utils/ipc'
 import { useLibraryStore } from './library'
 
 /** 播放模式 */
@@ -68,6 +68,73 @@ export const usePlayerStore = defineStore('player', () => {
 
   const hasLyric = computed(() => lyricLines.value.length > 0)
 
+  /* ------------------------------ 试听片段检测 ------------------------------ */
+
+  /** 已标记过质量问题的音源 id，避免对同一首歌反复上报同一个源 */
+  const markedSourceId = ref('')
+  /** 连续换源次数，防止在「全是片段源」的情况下无限重试 */
+  const fragmentAttempts = ref(0)
+
+  /**
+   * 用户是否手动暂停过。
+   *
+   * 这是一道闸门：「暂停一会儿自己又响起来」这类故障，八成是某个异步流程
+   * （换源重试、自动切歌、错误恢复）走到了 play()。
+   * 只要用户明确按过暂停，后续任何后台逻辑都不许自作主张恢复播放。
+   */
+  const userPaused = ref(false)
+
+  /**
+   * 校验音频实际长度。
+   *
+   * 部分音源给的是试听片段：实测有一条返回 47.9 秒的音频，而歌曲本身标注 250 秒。
+   * 更麻烦的是这类源响应往往还很快，不主动识别的话调度器会一直优先选它，
+   * 用户听到的永远是半截歌。
+   *
+   * 这里在拿到元数据的第一时间就判断，太短就标记该音源并自动换源重播。
+   */
+  async function verifyDuration(): Promise<void> {
+    const song = current.value
+    const info = urlInfo.value
+    const el = audio
+    if (!song || !info || !el) return
+
+    const actual = el.duration
+    const expected = song.duration
+    if (!Number.isFinite(actual) || actual <= 0) return
+    // 歌曲本身很短、或平台没给时长时不做判断，避免误杀
+    if (!expected || expected < 45) return
+
+    // 差距在 25% 以内视为正常：不同音源的版本确实可能略有长短
+    if (actual >= expected * 0.75) {
+      fragmentAttempts.value = 0
+      return
+    }
+
+    // 用户主动暂停过就别自动换源重播，免得「暂停后自己又响起来」
+    if (userPaused.value) return
+
+    // 同一个源只上报一次，否则会反复触发
+    if (markedSourceId.value === info.sourceId) return
+    markedSourceId.value = info.sourceId
+
+    try {
+      await reportBadSource(info.sourceId, song, `只提供 ${Math.round(actual)} 秒的试听片段`)
+    } catch {
+      /* 上报失败不影响换源 */
+    }
+
+    fragmentAttempts.value += 1
+    if (fragmentAttempts.value > 3) {
+      error.value = `已连续换过 ${fragmentAttempts.value} 个音源都只能试听，这首歌暂时听不了完整版`
+      playing.value = false
+      return
+    }
+
+    error.value = `上一个音源只给了 ${Math.round(actual)} 秒，已自动换源重试`
+    await play(song)
+  }
+
   /* ------------------------------ 音频实例 ------------------------------ */
 
   function ensureAudio(): HTMLAudioElement {
@@ -92,7 +159,11 @@ export const usePlayerStore = defineStore('player', () => {
       // 顺带兜底：有些音源要播一会儿才报出真实时长
       syncDuration()
     })
-    el.addEventListener('loadedmetadata', syncDuration)
+    el.addEventListener('loadedmetadata', () => {
+      syncDuration()
+      // 拿到元数据就校验时长：太短说明是试听片段，立刻换源，别等用户听半截
+      void verifyDuration()
+    })
     el.addEventListener('durationchange', syncDuration)
     el.addEventListener('progress', syncDuration)
     el.addEventListener('play', () => {
@@ -102,6 +173,21 @@ export const usePlayerStore = defineStore('player', () => {
       playing.value = false
     })
     el.addEventListener('ended', () => {
+      /**
+       * 防御：正常播完应该停在接近结尾的位置。
+       *
+       * 明显提前触发，说明音频流被异常中断（典型原因是音源只给了试听片段，
+       * 或者流被中途掐断）。这时自动切下一首，在用户看来就是
+       * 「莫名其妙自己跳歌」—— 与其莫名其妙地跳，不如停下来把原因讲清楚。
+       */
+      const total = el.duration
+      const played = el.currentTime
+      if (Number.isFinite(total) && total > 2 && played < total - 2) {
+        error.value = '音频流提前中断，该音源可能只提供试听片段'
+        playing.value = false
+        void verifyDuration()
+        return
+      }
       void handleEnded()
     })
     el.addEventListener('error', () => {
@@ -128,6 +214,8 @@ export const usePlayerStore = defineStore('player', () => {
     }
 
     current.value = song
+    // 新一轮播放由用户发起或由明确的切歌动作触发，解除暂停闸门
+    userPaused.value = false
     loading.value = true
     error.value = null
     urlInfo.value = null
@@ -176,12 +264,15 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function pause(): void {
+    // 记住「这是用户主动暂停的」，后续任何后台逻辑都不许偷偷恢复播放
+    userPaused.value = true
     audio?.pause()
     playing.value = false
   }
 
   function resume(): void {
     if (!current.value) return
+    userPaused.value = false
     const el = ensureAudio()
     void el.play().catch((err: unknown) => {
       error.value = cleanIpcError(err)

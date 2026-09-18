@@ -181,13 +181,14 @@ export class SourceManager extends EventEmitter {
 
   /**
    * 记一次失败冷却。
-   * 连续失败越多冷却越久（指数退避，封顶 10 分钟），
-   * 让反复挂掉的音源自动淡出调度，而单次偶发失败不会误伤。
+   * @param durationMs 显式指定冷却时长；不传则按连续失败次数指数退避
    */
-  markCooldown(sourceId: string, platform: string): void {
+  markCooldown(sourceId: string, platform: string, durationMs?: number): void {
     const src = this.sources.get(sourceId)
     const fails = Math.max(1, src?.info.stat.consecutiveFail ?? 1)
-    const ms = Math.min(60_000 * 2 ** Math.min(fails - 1, 3), 600_000)
+    // 不传就按连续失败次数退避，封顶 10 分钟；
+    // 传了就用调用方的值 —— 例如「只给试听片段」这种质量问题要冷却得更久
+    const ms = durationMs ?? Math.min(60_000 * 2 ** Math.min(fails - 1, 3), 600_000)
     this.cooldowns.set(`${sourceId}:${platform}`, Date.now() + ms)
   }
 

@@ -92,6 +92,14 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(CH.playProbe, (_e, url: string) => probeUrl(url))
 
+  // 渲染层发现音源给了试听片段时会调这里：冷却该源 + 清掉这首歌的缓存
+  ipcMain.handle(
+    CH.playReportBadSource,
+    (_e, sourceId: string, song: Song, reason?: string) => {
+      resolver.reportBadSource(sourceId, song, reason)
+    }
+  )
+
   /* ------------------------------ 下载 ------------------------------ */
 
   ipcMain.handle(CH.downloadAdd, (_e, req: DownloadAddRequest) => downloads.add(req))

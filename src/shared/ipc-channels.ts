@@ -25,6 +25,8 @@ export const CH = {
   playGetUrl: 'play:getUrl',
   playGetLyric: 'play:getLyric',
   playProbe: 'play:probe',
+  /** 上报某音源在某平台上质量不合格（如只给试听片段） */
+  playReportBadSource: 'play:reportBadSource',
   // 下载
   downloadAdd: 'download:add',
   downloadList: 'download:list',

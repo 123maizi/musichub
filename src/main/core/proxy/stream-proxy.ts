@@ -177,8 +177,22 @@ export class StreamProxy {
         const value = upstream.headers.get(key)
         if (value) outHeaders[key] = value
       }
-      // 上游没声明可断点续传时补一个，让播放器敢做 seek
-      if (!outHeaders['accept-ranges']) outHeaders['accept-ranges'] = 'bytes'
+
+      /**
+       * Range 语义必须与上游实际情况一致，否则播放器会出问题。
+       *
+       * 典型故障：播放器请求 `Range: bytes=N-`，而上游不支持断点、回了 200 全量流。
+       * 请求与响应的语义对不上时，浏览器会重新从头拉流 ——
+       * 表现出来正是「听着听着突然跳回开头」。
+       *
+       * 所以这里明确告诉它「本地址不支持断点」，让它老老实实顺序播放。
+       */
+      if (range && upstream.status === 200) {
+        outHeaders['accept-ranges'] = 'none'
+        delete outHeaders['content-range']
+      } else if (!outHeaders['accept-ranges']) {
+        outHeaders['accept-ranges'] = 'bytes'
+      }
 
       res.writeHead(upstream.status, corsHeaders(outHeaders))
 

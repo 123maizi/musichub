@@ -62,7 +62,13 @@ const api = {
     getUrl: (req: MusicUrlRequest) => invoke(CH.playGetUrl, req),
     getLyric: (song: Song, sourceIds?: string[]) =>
       invoke(CH.playGetLyric, song, sourceIds) as Promise<Lyric | null>,
-    probe: (url: string) => invoke(CH.playProbe, url)
+    probe: (url: string) => invoke(CH.playProbe, url),
+    /**
+     * 上报音源质量问题（例如只返回试听片段）。
+     * 主进程会冷却该音源并清掉这首歌的取流缓存，让下次请求自动换源。
+     */
+    reportBadSource: (sourceId: string, song: Song, reason?: string) =>
+      invoke(CH.playReportBadSource, sourceId, song, reason)
   },
 
   /* ------------------------------ 下载 ------------------------------ */

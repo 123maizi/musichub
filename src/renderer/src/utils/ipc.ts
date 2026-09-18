@@ -42,3 +42,11 @@ export function getLyric(song: Song, sourceIds?: string[]): Promise<Lyric | null
 export function addDownload(req: DownloadAddRequest): Promise<DownloadTask[]> {
   return window.api.download.add({ ...req, songs: req.songs.map((song) => toPlain(song)) })
 }
+
+/**
+ * 上报音源质量问题（目前用于「只给试听片段」）。
+ * 主进程会冷却该音源并清掉这首歌的取流缓存，于是下次请求自动换源。
+ */
+export function reportBadSource(sourceId: string, song: Song, reason?: string): Promise<void> {
+  return window.api.player.reportBadSource(sourceId, toPlain(song), reason)
+}

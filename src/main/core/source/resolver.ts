@@ -97,9 +97,39 @@ export class MusicResolver {
     })
   }
 
-  /** 清空缓存（音源重载或用户手动重试时用） */
-  clearCache(): void {
-    this.urlCache.clear()
+  /**
+   * 清缓存。
+   * 传 song 只清这首歌 —— 换源重试时必须这样做，否则会直接命中刚才那条坏地址；
+   * 不传则整体清空。
+   */
+  clearCache(song?: Song): void {
+    if (!song) {
+      this.urlCache.clear()
+      return
+    }
+    const prefix = `${song.platform}:${song.songmid}:`
+    for (const key of [...this.urlCache.keys()]) {
+      if (key.startsWith(prefix)) this.urlCache.delete(key)
+    }
+  }
+
+  /**
+   * 上报「这个音源在这首歌上不合格」。
+   *
+   * 目前唯一的触发场景是「只给试听片段」：实测有音源返回 47.9 秒的音频，
+   * 而歌曲本身标注 250 秒。这类源响应往往还很快，不主动标记的话
+   * 调度器会一直优先选它 —— 用户听到的永远是半截歌。
+   */
+  reportBadSource(sourceId: string, song: Song, reason = '质量不合格'): void {
+    // 冷却 30 分钟：这类问题通常来自接口策略，短时间内不会自愈
+    this.deps.sources.markCooldown(sourceId, song.platform, 30 * 60 * 1000)
+    // 清掉这首歌的缓存，否则「换源重试」会命中同一条坏地址
+    this.clearCache(song)
+    this.deps.onLog?.(
+      'warn',
+      'resolver',
+      `音源 ${sourceId} 在 ${song.platform} 被标记为不合格：${reason}`
+    )
   }
 
   /**
