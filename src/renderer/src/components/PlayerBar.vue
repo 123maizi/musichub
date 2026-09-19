@@ -71,8 +71,20 @@ async function downloadCurrent(): Promise<void> {
 
 <template>
   <footer class="player-bar">
-    <!-- 进度条贴在最上沿，视觉上不占高度 -->
-    <div class="progress-track">
+    <!--
+      进度条常驻显示。
+
+      之前它是一条 3px 的暗色线，圆点还要悬停才出现 —— 结果就是「没进度条，
+      鼠标放上去才看得见进度」。现在改成自己画的进度：底槽常显，
+      已播放段用蓝色填充，拖动圆点始终可见。
+      仍然保留原生 input[type=range] 负责交互（键盘、拖动、无障碍都靠它），
+      只是把它的外观全部换成我们自己的那层。
+    -->
+    <div class="progress-track" :class="{ seeking }">
+      <div class="progress-rail">
+        <div class="progress-fill" :style="{ width: `${displayProgress}%` }"></div>
+        <div class="progress-knob" :style="{ left: `${displayProgress}%` }"></div>
+      </div>
       <input
         class="progress-input"
         type="range"
@@ -81,6 +93,7 @@ async function downloadCurrent(): Promise<void> {
         step="0.1"
         :value="displayProgress"
         :disabled="!player.current || player.duration <= 0"
+        aria-label="播放进度"
         @input="onSeekInput"
         @change="onSeekCommit"
       />
@@ -214,17 +227,73 @@ async function downloadCurrent(): Promise<void> {
 
 .progress-track {
   position: absolute;
-  top: -6px;
+  top: 0;
   left: 0;
   right: 0;
-  height: 12px;
+  height: 14px;
   display: flex;
   align-items: center;
+  padding: 0 14px;
 }
 
-.progress-input {
+/* 底槽：未播放段。常显，不再靠悬停才出现 */
+.progress-rail {
+  position: relative;
   width: 100%;
-  height: 12px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  transition: height 0.14s;
+}
+
+/* 已播放段：蓝色 */
+.progress-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  background: var(--progress);
+  transition: background 0.14s;
+}
+
+/* 拖动圆点：始终可见，悬停/拖动时变大 */
+.progress-knob {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  border-radius: 50%;
+  background: var(--progress);
+  border: 2px solid var(--bg-panel);
+  transform: translateY(-50%) scale(0.72);
+  transition: transform 0.14s;
+  pointer-events: none;
+}
+
+.progress-track:hover .progress-knob,
+.progress-track.seeking .progress-knob {
+  transform: translateY(-50%) scale(1);
+}
+
+.progress-track:hover .progress-rail,
+.progress-track.seeking .progress-rail {
+  height: 6px;
+}
+
+.progress-track:hover .progress-fill,
+.progress-track.seeking .progress-fill {
+  background: #5b9bff;
+}
+
+/* 真正的交互层：完全透明，盖在上面吃事件 */
+.progress-input {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  width: calc(100% - 28px);
+  height: 14px;
   margin: 0;
   padding: 0;
   border: none;
@@ -232,32 +301,26 @@ async function downloadCurrent(): Promise<void> {
   -webkit-appearance: none;
   appearance: none;
   cursor: pointer;
+  opacity: 0;
 }
 
+.progress-input:disabled {
+  cursor: default;
+}
+
+/* 轨道和圆点都已由上层自绘，这里全部隐藏掉外观 */
 .progress-input::-webkit-slider-runnable-track {
-  height: 3px;
-  background: var(--line);
+  height: 14px;
+  background: transparent;
 }
 
 .progress-input::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 11px;
-  height: 11px;
-  margin-top: -4px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
-  background: var(--accent);
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.progress-input:hover::-webkit-slider-thumb,
-.progress-input:focus::-webkit-slider-thumb {
-  opacity: 1;
-}
-
-.progress-input:disabled {
-  cursor: default;
+  background: transparent;
 }
 
 /* ------------------------------ 主体 ------------------------------ */

@@ -22,6 +22,7 @@ export class JsonStore<T extends object> {
   private readonly defaults: T
   private readonly options: Required<JsonStoreOptions>
   private timer: NodeJS.Timeout | null = null
+  private readonly listeners: ((next: T) => void)[] = []
 
   constructor(filePath: string, defaults: T, options: JsonStoreOptions = {}) {
     this.filePath = filePath
@@ -38,10 +39,25 @@ export class JsonStore<T extends object> {
     return this.data
   }
 
+  /**
+   * 订阅变更。
+   *
+   * 用途：有些字段一变，别处的状态就得跟着调 —— 比如下载目录变了，
+   * 本地流代理的白名单必须同步，否则换目录后新下的歌会播不了。
+   */
+  onChange(listener: (next: T) => void): () => void {
+    this.listeners.push(listener)
+    return () => {
+      const i = this.listeners.indexOf(listener)
+      if (i >= 0) this.listeners.splice(i, 1)
+    }
+  }
+
   /** 浅合并更新并落盘 */
   set(patch: Partial<T>): T {
     this.data = { ...this.data, ...patch } as T
     this.scheduleSave()
+    this.emit()
     return this.data
   }
 
@@ -49,6 +65,7 @@ export class JsonStore<T extends object> {
   replace(next: T): T {
     this.data = next
     this.scheduleSave()
+    this.emit()
     return this.data
   }
 
@@ -89,6 +106,17 @@ export class JsonStore<T extends object> {
       this.timer = null
       this.writeNow()
     }, this.options.debounceMs)
+  }
+
+  /** 通知订阅者；单个订阅者抛错不影响其它人 */
+  private emit(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(this.data)
+      } catch (err) {
+        console.error('[store] 变更回调失败', err)
+      }
+    }
   }
 
   private writeNow(): void {

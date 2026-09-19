@@ -20,6 +20,8 @@ import type {
   SourceAttempt
 } from '@shared/types/music'
 import { APP_CONST, qualityRank } from '@shared/constants'
+import { existsSync } from 'node:fs'
+import { extname } from 'node:path'
 import { errorMessage } from '@main/utils/error'
 import { fetchBuiltinLyric } from '../lyric'
 import type { LoadedSource, SourceManager } from './manager'
@@ -141,7 +143,7 @@ export class MusicResolver {
     const attempts: SourceAttempt[] = []
 
     if (song.platform === 'local') {
-      throw new Error('本地歌曲无需取流')
+      return this.resolveLocal(song)
     }
 
     // 命中缓存直接返回：重复播放、拖完进度重取、切回上一首都不必再打扰音源
@@ -184,7 +186,33 @@ export class MusicResolver {
   }
 
   /**
-   * 取歌词。多音源里任何一个能提供即返回。
+   * 本地文件取流。
+   *
+   * 之前这里直接抛「本地歌曲无需取流」—— 因为当时没想好本地文件怎么播放。
+   * 结果就是下载完的歌在应用里根本放不了（点播放只会弹一句错误）。
+   * 现在交给本地流代理：它带 Range，本地文件也能正常拖动进度。
+   */
+  private resolveLocal(song: Song): MusicUrlResult {
+    const path = song.localPath
+    if (!path) throw new Error('这条本地记录没有文件路径，无法播放')
+    if (!existsSync(path)) throw new Error(`文件不存在或已被移动：${path}`)
+
+    return {
+      url: this.deps.proxy.wrapLocal(path),
+      quality: '320k',
+      sourceId: 'local',
+      sourceName: '本地文件',
+      // 本地文件同样经由本地流代理提供（Range、CORS 都由它兜住）
+      proxied: true,
+      ext: extname(path).replace('.', '').toLowerCase() || undefined,
+      attempts: []
+    }
+  }
+
+  /**
+   * 取歌词
+   * 策略：音源脚本优先，拿不到或内容为空时回落到内置接口。
+   * 多音源里任何一个能提供即返回。
    */
   async getLyric(song: Song, sourceIds?: string[]): Promise<Lyric | null> {
     const candidates = this.pickCandidates(song, sourceIds).filter((src) =>

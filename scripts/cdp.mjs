@@ -82,6 +82,17 @@ if (cmd === 'eval') {
   process.exit(0)
 }
 
+/* 从文件读探针代码：node scripts/cdp.mjs evalfile <路径>
+   多行脚本走命令行会被 shell 的引号规则折腾，放文件里干净得多 */
+if (cmd === 'evalfile') {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(process.argv[3], 'utf8')
+  const value = await evaluate(cdp, `(async () => { ${src} })()`)
+  console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2))
+  cdp.close()
+  process.exit(0)
+}
+
 console.log(`已连接渲染进程：${page.title}`)
 
 /* ---------------------------------------------------------------- */

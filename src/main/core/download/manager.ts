@@ -33,6 +33,11 @@ import { writeAudioTag } from './tag-writer'
 export interface DownloadManagerDeps {
   resolver: MusicResolver
   configStore: JsonStore<DownloadConfig>
+  /**
+   * 下载记录的持久化存储。
+   * 没有它，下载列表在重启后就空了 —— 用户下过的歌既看不到也播不了。
+   */
+  historyStore?: JsonStore<{ tasks: DownloadTask[] }>
   onLog?: (level: 'info' | 'warn' | 'error', scope: string, message: string) => void
 }
 
@@ -50,6 +55,51 @@ export class DownloadManager extends EventEmitter {
   constructor(deps: DownloadManagerDeps) {
     super()
     this.deps = deps
+    this.restoreTasks()
+  }
+
+  /* ------------------------------ 任务持久化 ------------------------------ */
+
+  /**
+   * 从磁盘恢复下载记录。
+   *
+   * 之前这套记录只存在内存里 —— 关掉应用再打开，下载列表就是空的，
+   * 用户明明下过歌，却既看不到、也没法在应用里播（这正是
+   * 「下载的歌曲无法播放」的一半原因）。
+   *
+   * 恢复时把「下载中 / 排队中」这类未完成状态改成已暂停：
+   * 上次进程已经没了，连接早断了，标记成暂停才符合实际，也让用户
+   * 能点「继续」把 .part 接着下完。
+   */
+  private restoreTasks(): void {
+    const store = this.deps.historyStore
+    if (!store) return
+
+    const saved = store.get().tasks ?? []
+    for (const task of saved) {
+      if (!task?.id) continue
+      const restored: DownloadTask = { ...task }
+      if (restored.status === 'downloading' || restored.status === 'pending' || restored.status === 'waiting') {
+        restored.status = 'paused'
+        restored.speed = 0
+      }
+      this.tasks.set(restored.id, restored)
+    }
+
+    if (saved.length > 0) {
+      this.deps.onLog?.('info', 'download', `已恢复 ${saved.length} 条下载记录`)
+    }
+  }
+
+  /** 把任务列表写回磁盘（只存有价值的字段，省得文件越来越大） */
+  private persistTasks(): void {
+    const store = this.deps.historyStore
+    if (!store) return
+    try {
+      store.set({ tasks: this.list() })
+    } catch (err) {
+      this.deps.onLog?.('warn', 'download', `保存下载记录失败: ${errMsg(err)}`)
+    }
   }
 
   /* ------------------------------ 配置 ------------------------------ */
@@ -102,6 +152,8 @@ export class DownloadManager extends EventEmitter {
       this.emit('progress', { ...task })
     }
 
+    // 入队即落盘：万一这一步之后应用被强杀，至少记录还在
+    this.persistTasks()
     this.pump()
     return created
   }
@@ -123,6 +175,7 @@ export class DownloadManager extends EventEmitter {
       task.speed = 0
       this.emit('progress', { ...task })
     }
+    this.persistTasks()
   }
 
   /** 继续下载 */
@@ -134,6 +187,7 @@ export class DownloadManager extends EventEmitter {
       if (!this.queue.includes(id)) this.queue.push(id)
       this.emit('progress', { ...task })
     }
+    this.persistTasks()
     this.pump()
   }
 
@@ -149,6 +203,7 @@ export class DownloadManager extends EventEmitter {
       if (!this.queue.includes(id)) this.queue.push(id)
       this.emit('progress', { ...task })
     }
+    this.persistTasks()
     this.pump()
   }
 
@@ -173,6 +228,7 @@ export class DownloadManager extends EventEmitter {
       }
       this.tasks.delete(id)
     }
+    this.persistTasks()
   }
 
   /** 清空已完成记录（不删文件） */
@@ -180,6 +236,7 @@ export class DownloadManager extends EventEmitter {
     for (const [id, task] of this.tasks) {
       if (task.status === 'done') this.tasks.delete(id)
     }
+    this.persistTasks()
   }
 
   dispose(): void {
@@ -188,6 +245,9 @@ export class DownloadManager extends EventEmitter {
     this.controllers.clear()
     this.queue.length = 0
     this.deps.configStore.flush()
+    // 退出前把任务列表落盘，否则重启后下载记录又没了
+    this.persistTasks()
+    this.deps.historyStore?.flush()
   }
 
   /* ------------------------------ 调度 ------------------------------ */
@@ -235,6 +295,7 @@ export class DownloadManager extends EventEmitter {
         task.finishedAt = Date.now()
         this.emit('done', { ...task })
         this.emit('progress', { ...task })
+        this.persistTasks()
         this.deps.onLog?.('info', 'download', `下载完成: ${task.fileName}`)
         return
       } catch (err) {
@@ -244,6 +305,7 @@ export class DownloadManager extends EventEmitter {
           // 用户主动暂停/取消，不算失败
           if (task.status !== 'paused' && task.status !== 'cancelled') task.status = 'paused'
           this.emit('progress', { ...task })
+          this.persistTasks()
           return
         }
 
@@ -254,6 +316,7 @@ export class DownloadManager extends EventEmitter {
           task.speed = 0
           this.emit('error', { ...task })
           this.emit('progress', { ...task })
+          this.persistTasks()
           this.deps.onLog?.('error', 'download', `下载失败 ${task.fileName}: ${message}`)
           return
         }

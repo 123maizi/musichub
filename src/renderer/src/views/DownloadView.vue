@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import type { DownloadTask } from '@shared/types/download'
+import type { Song } from '@shared/types/music'
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
 import { useDownloadStore } from '../stores/downloads'
+import { usePlayerStore } from '../stores/player'
 import { formatBytes, formatSpeed } from '../utils/format'
 
 const downloads = useDownloadStore()
+const player = usePlayerStore()
 
 /** Vue 模板作用域看不到全局 window，显式暴露给模板用 */
 const api = window.api
@@ -56,6 +59,53 @@ async function openTask(task: DownloadTask): Promise<void> {
   } catch {
     await api.download.showInFolder(task.savePath)
   }
+}
+
+/**
+ * 在应用内播放已下载的文件。
+ *
+ * 之前的「播放」按钮其实是把文件丢给系统默认播放器（在用户机器上关联的是
+ * 网易云音乐）—— 点下去弹出去一个别的软件，用起来既不像播放、
+ * 也谈不上「下载完就能听」。现在直接在本应用里播，走本地流代理。
+ */
+async function playTask(task: DownloadTask): Promise<void> {
+  if (task.status !== 'done') return
+
+  const song = localSongOf(task)
+
+  /**
+   * 队列要跟着一起换。
+   *
+   * 只改 current 而不动队列的话，currentIndex 还指着上一批歌，
+   * 按「下一首」会跳到毫不相干的位置去。所以这里把全部已下载的文件
+   * 当成一个播放列表传进去 —— 下完的歌连起来听，本来也是最自然的用法。
+   */
+  const list = downloads.tasks.filter((t) => t.status === 'done').map(localSongOf)
+  await player.play(song, list)
+}
+
+/**
+ * 把下载任务映射成一首「本地歌曲」。
+ *
+ * id 与 songmid 都换成文件路径，这样同一首歌的不同文件（比如两个音质版本）
+ * 在播放队列里也是两条独立记录，不会互相顶掉。
+ */
+function localSongOf(task: DownloadTask): Song {
+  return {
+    ...task.song,
+    id: `local_${task.savePath}`,
+    platform: 'local',
+    songmid: task.savePath,
+    localPath: task.savePath,
+    albumName: task.song.albumName || '',
+    duration: task.song.duration || 0,
+    qualities: task.song.qualities?.length ? task.song.qualities : ['320k']
+  }
+}
+
+/** 当前是否正在播放这条本地记录 */
+function isPlayingTask(task: DownloadTask): boolean {
+  return player.current?.id === `local_${task.savePath}`
 }
 </script>
 
@@ -170,10 +220,19 @@ async function openTask(task: DownloadTask): Promise<void> {
           <button
             v-if="task.status === 'done'"
             class="ghost small"
-            title="播放"
+            :class="{ active: isPlayingTask(task) }"
+            title="在应用内播放这个文件"
+            @click="playTask(task)"
+          >
+            {{ isPlayingTask(task) ? '播放中' : '播放' }}
+          </button>
+          <button
+            v-if="task.status === 'done'"
+            class="ghost small"
+            title="用系统默认播放器打开"
             @click="openTask(task)"
           >
-            打开
+            用系统播放器
           </button>
           <button
             v-if="task.status === 'done'"

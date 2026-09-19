@@ -14,7 +14,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { APP_CONST, DEFAULT_NAME_TEMPLATE } from '@shared/constants'
-import type { DownloadConfig } from '@shared/types/download'
+import type { DownloadConfig, DownloadTask } from '@shared/types/download'
 
 import { SourceManager } from './core/source/manager'
 import { SearchEngine } from './core/search/engine'
@@ -120,6 +120,16 @@ async function bootstrap(): Promise<void> {
     preferQuality: '320k'
   })
 
+  /**
+   * 把下载目录登记为「允许本地播放」的白名单。
+   * 代理只放行白名单内的路径 —— 它是本机端口，不能变成任意文件读取接口。
+   */
+  proxy.setLocalRoots([configStore.get().dir, defaultDownloadDir])
+  // 用户改了下载目录也要跟着更新，否则换目录后新下的歌又播不了
+  configStore.onChange((next) => {
+    proxy.setLocalRoots([next.dir, defaultDownloadDir])
+  })
+
   /* --------------------------- 3. 核心服务 --------------------------- */
   const sourceDir = join(userData, APP_CONST.sourceDirName)
   /**
@@ -142,7 +152,20 @@ async function bootstrap(): Promise<void> {
 
   const search = new SearchEngine({ sources, onLog: log })
   const resolver = new MusicResolver({ sources, proxy, onLog: log })
-  const downloads = new DownloadManager({ resolver, configStore, onLog: log })
+  const downloads = new DownloadManager({
+    resolver,
+    configStore,
+    /**
+     * 下载记录要落盘。
+     * 之前只存在内存里，重启后列表就是空的 —— 用户下过的歌看不到也播不了。
+     */
+    historyStore: new JsonStore<{ tasks: DownloadTask[] }>(
+      join(userData, 'download-tasks.json'),
+      { tasks: [] },
+      { debounceMs: 400 }
+    ),
+    onLog: log
+  })
   // 音乐库：喜欢 / 历史 / 歌单统一落在用户数据目录
   const library = new LibraryService(join(userData, 'library.json'))
 

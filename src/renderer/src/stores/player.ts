@@ -59,6 +59,19 @@ export const usePlayerStore = defineStore('player', () => {
 
   let audio: HTMLAudioElement | null = null
 
+  /**
+   * 上一次「程序化跳转」的时间戳。
+   * 拖动进度条后紧接着收到的 ended 不可信（详见 seek 与 ended 处的说明）。
+   */
+  let lastSeekAt = 0
+
+  /**
+   * 拖动进度条后多久内不认 ended。
+   * 1.2 秒足够覆盖「拖到结尾 → 立刻 ended」这个瞬间，
+   * 又不会长到把真正的播放结束挡在外面。
+   */
+  const SEEK_ENDED_GUARD = 1200
+
   /* ------------------------------ 派生 ------------------------------ */
 
   /**
@@ -121,6 +134,8 @@ export const usePlayerStore = defineStore('player', () => {
     const actual = el.duration
     const expected = song.duration
     if (!Number.isFinite(actual) || actual <= 0) return
+    // 本地文件没有音源可换，时长对不上多半是标签写得不准，不该去换源
+    if (song.platform === 'local') return
     // 歌曲本身很短、或平台没给时长时不做判断，避免误杀
     if (!expected || expected < 45) return
 
@@ -203,6 +218,16 @@ export const usePlayerStore = defineStore('player', () => {
       const played = el.currentTime
 
       /**
+       * 刚拖过进度条就判「播完了」是不可信的。
+       * 拖动落点若靠近结尾，浏览器会立刻发 ended —— 此时用户显然不是
+       * 想切歌，只是把光标放到了尾巴上。这种情况只停下，不自动跳。
+       */
+      if (Date.now() - lastSeekAt < SEEK_ENDED_GUARD) {
+        playing.value = false
+        return
+      }
+
+      /**
        * 判断这次 ended 是不是「真的播完了」。
        *
        * 正常播完：时长合理（≥15 秒）且位置停在接近结尾处。
@@ -228,8 +253,12 @@ export const usePlayerStore = defineStore('player', () => {
       void handleEnded()
     })
     el.addEventListener('error', () => {
-      // 地址失效是多音源场景下最常见的问题，给出可行动的提示
-      error.value = '播放失败：该音源地址已失效，换首歌或切换音源试试'
+      // 本地文件的失败原因和网络音源完全不同，提示得分开写，
+      // 否则用户会看到「音源地址失效」去折腾音源，而其实是文件被删了
+      error.value =
+        current.value?.platform === 'local'
+          ? '播放失败：本地文件读不出来，可能已被删除或移动到别处'
+          : '播放失败：该音源地址已失效，换首歌或切换音源试试'
       playing.value = false
       loading.value = false
     })
@@ -264,6 +293,8 @@ export const usePlayerStore = defineStore('player', () => {
     translateError.value = ''
     translatedSongId.value = ''
     currentTime.value = 0
+    // 换歌了，上一首的「刚拖过进度条」状态不能带过来
+    lastSeekAt = 0
     // 重置音频上报的时长，真实值会在加载与播放过程中补上
     mediaDuration.value = 0
 
@@ -380,13 +411,62 @@ export const usePlayerStore = defineStore('player', () => {
   function seek(seconds: number): void {
     const el = ensureAudio()
     if (!Number.isFinite(seconds)) return
-    el.currentTime = Math.max(0, seconds)
+
+    /**
+     * 必须夹到「真正能播到的位置」。
+     *
+     * 这里踩过两个坑，合起来就是「拖进度条有概率从头播放或直接切歌」：
+     *
+     *  1. 元数据时长常常长于流的真实时长（音源给试听片段时尤其明显，
+     *     标注 290 秒、流里只有 48 秒）。按比例换算出的目标位置早就越过结尾，
+     *     浏览器会把它夹到结尾并立刻判定播放结束 → 自动切歌。
+     *  2. 拖到 100% 本身也落在结尾上，同样立刻触发结束。
+     *
+     * 所以这里取 seekable 的终点再往回让 0.3 秒 —— 落点永远在结尾之前，
+     * 不会因为「恰好拖到边界」被判成播完。
+     */
+    const end = seekableEnd(el)
+    const target = Math.max(0, Math.min(seconds, end))
+    lastSeekAt = Date.now()
+    try {
+      el.currentTime = target
+    } catch {
+      /* 元数据还没就绪时赋值可能抛错，忽略即可 */
+    }
     currentTime.value = el.currentTime
   }
 
+  /** 可跳转区间的终点（秒）；拿不到就退回 duration，再拿不到就给个足够大的值 */
+  function seekableEnd(el: HTMLAudioElement): number {
+    const EPSILON = 0.3
+    try {
+      if (el.seekable && el.seekable.length > 0) {
+        const end = el.seekable.end(el.seekable.length - 1)
+        if (Number.isFinite(end) && end > 0) return Math.max(0, end - EPSILON)
+      }
+    } catch {
+      /* 某些状态下访问 seekable 会抛错 */
+    }
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      return Math.max(0, el.duration - EPSILON)
+    }
+    return Number.MAX_SAFE_INTEGER
+  }
+
   function seekByPercent(percent: number): void {
-    if (duration.value <= 0) return
-    seek((percent / 100) * duration.value)
+    const el = ensureAudio()
+
+    /**
+     * 按「流的真实时长」换算，而不是元数据时长。
+     * 进度条刻度用的是 duration（可能来自元数据），两者不一致时
+     * 以真实时长为准才不会越过结尾。
+     */
+    const real = el.duration
+    const total = Number.isFinite(real) && real > 0 ? real : duration.value
+    if (!(total > 0)) return
+
+    const clamped = Math.max(0, Math.min(100, percent))
+    seek((clamped / 100) * total)
   }
 
   function setVolume(value: number): void {

@@ -55,6 +55,11 @@ export interface Song {
   channel?: SearchChannel
   /** 由哪个音源/搜索 provider 提供 */
   providerId?: string
+  /**
+   * 本地音频文件的绝对路径（仅 platform === 'local' 时有值）。
+   * 取流时不再走音源脚本，直接由本地流代理提供。
+   */
+  localPath?: string
   /** 平台原始字段（取流透传用） */
   raw?: Record<string, unknown>
 }

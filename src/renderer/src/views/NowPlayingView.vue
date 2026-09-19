@@ -305,20 +305,27 @@ function queueCurrent(): void {
           </button>
         </div>
 
-        <!-- 进度 -->
+        <!-- 进度：与底部播放条保持同一套观感（已播放段蓝色） -->
         <div class="progress-row">
           <span class="time mono">{{ formatTime(displayTime) }}</span>
-          <input
-            class="seek"
-            type="range"
-            min="0"
-            max="100"
-            step="0.1"
-            :value="displayProgress"
-            :disabled="!player.current || player.duration <= 0"
-            @input="onSeekInput"
-            @change="onSeekCommit"
-          />
+          <div class="seek-wrap" :class="{ seeking }">
+            <div class="seek-rail">
+              <div class="seek-fill" :style="{ width: `${displayProgress}%` }"></div>
+              <div class="seek-knob" :style="{ left: `${displayProgress}%` }"></div>
+            </div>
+            <input
+              class="seek"
+              type="range"
+              min="0"
+              max="100"
+              step="0.1"
+              :value="displayProgress"
+              :disabled="!player.current || player.duration <= 0"
+              aria-label="播放进度"
+              @input="onSeekInput"
+              @change="onSeekCommit"
+            />
+          </div>
           <span class="time mono faint">{{ formatTime(player.duration) }}</span>
         </div>
 
@@ -589,10 +596,67 @@ function queueCurrent(): void {
   text-align: center;
 }
 
-.seek {
+.seek-wrap {
+  position: relative;
   flex: 1;
   min-width: 0;
   height: 20px;
+  display: flex;
+  align-items: center;
+}
+
+.seek-rail {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  transition: height 0.14s;
+}
+
+.seek-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  background: var(--progress);
+}
+
+.seek-knob {
+  position: absolute;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  margin-left: -6.5px;
+  border-radius: 50%;
+  background: var(--progress);
+  border: 2px solid var(--bg-panel);
+  transform: translateY(-50%) scale(0.8);
+  transition: transform 0.14s;
+  pointer-events: none;
+}
+
+.seek-wrap:hover .seek-knob,
+.seek-wrap.seeking .seek-knob {
+  transform: translateY(-50%) scale(1);
+}
+
+.seek-wrap:hover .seek-rail,
+.seek-wrap.seeking .seek-rail {
+  height: 6px;
+}
+
+.seek-wrap:hover .seek-fill {
+  background: #5b9bff;
+}
+
+/* 交互层：透明覆盖，键盘与拖动都靠它 */
+.seek {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   margin: 0;
   padding: 0;
   border: none;
@@ -600,27 +664,24 @@ function queueCurrent(): void {
   -webkit-appearance: none;
   appearance: none;
   cursor: pointer;
+  opacity: 0;
 }
 
 .seek::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--line);
+  height: 20px;
+  background: transparent;
 }
 
 .seek::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 13px;
-  height: 13px;
-  margin-top: -4.5px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(212, 162, 76, 0.15);
+  background: transparent;
 }
 
 .seek:disabled {
-  opacity: 0.4;
   cursor: default;
 }
 
