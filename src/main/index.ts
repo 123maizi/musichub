@@ -23,6 +23,8 @@ import { StreamProxy } from './core/proxy/stream-proxy'
 import { DownloadManager } from './core/download/manager'
 import { JsonStore } from './core/storage/store'
 import { LibraryService } from './core/storage/library'
+import { AiConfigStore, type StoredAiConfig } from './core/storage/ai-config'
+import { DEFAULT_AI_CONFIG } from '@shared/types/ai'
 import { registerIpc } from './ipc'
 import { createWindow } from './window'
 
@@ -130,6 +132,18 @@ async function bootstrap(): Promise<void> {
     proxy.setLocalRoots([next.dir, defaultDownloadDir])
   })
 
+  /**
+   * AI 翻译配置。
+   * API Key 交给 AiConfigStore 用系统凭据（Windows 上是 DPAPI）加密后再落盘，
+   * 明文只留在内存里 —— 配置文件被拷走也解不开。
+   */
+  const aiStore = new AiConfigStore(
+    new JsonStore<StoredAiConfig>(join(userData, 'ai-config.json'), {
+      ...DEFAULT_AI_CONFIG,
+      apiKey: undefined
+    } as unknown as StoredAiConfig)
+  )
+
   /* --------------------------- 3. 核心服务 --------------------------- */
   const sourceDir = join(userData, APP_CONST.sourceDirName)
   /**
@@ -177,6 +191,7 @@ async function bootstrap(): Promise<void> {
     downloads,
     library,
     proxy,
+    ai: aiStore,
     sourceDir,
     downloadDir: configStore.get().dir
   })

@@ -13,6 +13,7 @@ import type {
 } from './music'
 import type { DownloadAddRequest, DownloadConfig, DownloadTask } from './download'
 import type { SourceImportResult, SourceInfo } from './source'
+import type { AiConfig, AiTestResult } from './ai'
 
 export interface AppInfo {
   name: string
@@ -102,6 +103,14 @@ export interface AppApi {
   openExternal(url: string): Promise<void>
   /** 打开开发者工具 */
   toggleDevTools(): void
+}
+
+/** AI 歌词翻译 API */
+export interface AiApi {
+  getConfig(): Promise<AiConfig>
+  setConfig(patch: Partial<AiConfig>): Promise<AiConfig>
+  /** 测试连通性；顺带返回服务端可用模型列表 */
+  test(): Promise<AiTestResult>
 }
 
 /** 主进程推送事件（renderer 监听） */

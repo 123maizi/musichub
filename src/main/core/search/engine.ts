@@ -15,6 +15,7 @@ import type {
   Song
 } from '@shared/types/music'
 import { APP_CONST, qualityRank } from '@shared/constants'
+import { keywordWantsVariant, titlePurityScore } from '@shared/purity'
 import type { SourceManager } from '../source/manager'
 import { builtinProviders, type ProviderSearchResult, type SearchProvider } from './builtin'
 // 艺人搜索是独立模块（接口结构完全不同），单独引入，刻意不动已经稳定的 builtin
@@ -481,60 +482,10 @@ export class SearchEngine {
   }
 
   /**
-   * 改版特征词。
-   *
-   * 用户搜「晴天」时，结果常被 DJ 版 / 伴奏 / 翻唱 / 广场舞版淹没，
-   * 原唱反而排在十几条之后。命中这些词就降权，让原唱浮上来。
-   */
-  private static readonly VARIANT_WORDS = [
-    'cover',
-    '翻唱',
-    '翻自',
-    'remix',
-    '混音',
-    'dj',
-    '伴奏',
-    'karaoke',
-    'ktv',
-    'live',
-    '现场',
-    '演唱会',
-    '纯音乐',
-    '钢琴',
-    '吉他版',
-    '古筝',
-    '八音盒',
-    '抖音',
-    '铃声',
-    '片段',
-    '加速',
-    '减速',
-    '慢速',
-    '降调',
-    '升调',
-    '女声',
-    '男声',
-    '童声',
-    '方言',
-    '串烧',
-    'medley',
-    'mashup',
-    '电音',
-    '摇滚版',
-    '爵士版',
-    '民谣版',
-    '合唱版',
-    '对唱',
-    '消音',
-    '原版伴奏',
-    '完整版'
-  ]
-
-  /**
    * 给单首歌打「原唱可能性」分。
    * 分数只用于排序，不影响展示字段。
    */
-  private scoreSong(song: Song, keyword: string): number {
+  private scoreSong(song: Song, keyword: string, wantsVariant: boolean): number {
     const kw = keyword.trim().toLowerCase()
     const name = song.name.toLowerCase()
     const singer = song.singer.toLowerCase()
@@ -545,13 +496,12 @@ export class SearchEngine {
     else if (name.startsWith(kw)) score += 70
     else if (name.includes(kw)) score += 30
 
-    // 2) 改版惩罚。命中一个就够，避免多重叠加把正常歌压死
-    for (const word of SearchEngine.VARIANT_WORDS) {
-      if (name.includes(word)) {
-        score -= 80
-        break
-      }
-    }
+    /**
+     * 2) 标题纯净度（见 @shared/purity）：
+     *    干净的名字加分，带 DJ / 伴奏 / 变速 / 烟嗓这类改版后缀的扣分。
+     *    用户专门搜改版时不生效 —— 那种时候他要找的正是这些。
+     */
+    if (!wantsVariant) score += titlePurityScore(song.name)
 
     // 3) 歌手名命中（用户直接搜「周杰伦」时，这条最管用）
     if (singer.includes(kw)) score += 60
@@ -574,10 +524,12 @@ export class SearchEngine {
 
   /** 对一组结果做原唱优先排序（稳定排序，同分保持平台原序） */
   private rankSongs(songs: Song[], keyword: string): void {
+    // 用户在专门找改版（搜索词里自带 DJ/伴奏 之类）时，整套纯净度惩罚不参与
+    const wantsVariant = keywordWantsVariant(keyword)
     const scored = songs.map((song, index) => ({
       song,
       index,
-      score: this.scoreSong(song, keyword)
+      score: this.scoreSong(song, keyword, wantsVariant)
     }))
     scored.sort((a, b) => (b.score - a.score) || (a.index - b.index))
     scored.forEach((item, i) => {

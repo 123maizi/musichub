@@ -21,8 +21,10 @@
  *
  * 歌词是 LRC 格式，每行带时间戳；只翻文本，时间戳原样保留。
  */
+import type { AiConfig } from '@shared/types/ai'
 import type { Lyric } from '@shared/types/music'
 import { httpRequest } from '../net/http'
+import { translateLinesWithAi } from './ai-translate'
 import { getCachedTranslation, putCachedTranslation } from './translate-cache'
 
 /** MyMemory 单次查询上限（留余量，按 480 分片） */
@@ -40,6 +42,20 @@ const TIME_TAG = /^((?:\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\])+)\s*(.*)$/
 
 /** LRC 元信息行，不需要翻译 */
 const META_LINE = /^\[(ti|ar|al|by|offset|re|ve|length|kana):/i
+
+/**
+ * 这一行是不是 LRC 元信息（[ti:] / [ar:] / [al:] …）。
+ *
+ * 这里踩过一个隐蔽的坑：`parseLrcLines` 对没有时间戳的行会把**整行**
+ * 作为 text 返回，也就是 text 本身就是 `[ti:标题]`。
+ * 早先的代码又给它套了一层方括号去匹配（`[${text}]`），
+ * 于是正则永远匹配不上 —— 元信息行被当成歌词发去翻译了，
+ * 回来就变成「[ti:想象的标题]」，还会白白消耗额度与 token。
+ * 直接拿 text 本身去匹配才是对的。
+ */
+function isMetaLine(text: string): boolean {
+  return META_LINE.test(text)
+}
 
 type Json = Record<string, any>
 
@@ -225,7 +241,7 @@ export async function translateLrcDetailed(
   for (let i = 0; i < lines.length; i += 1) {
     const { text } = lines[i]
     if (!text) continue
-    if (META_LINE.test(`[${text}]`)) continue
+    if (isMetaLine(text)) continue
     if (!/[\p{L}]/u.test(text)) continue
     indexes.push(i)
   }
@@ -343,6 +359,112 @@ export async function translateLrcDetailed(
 export async function translateLrc(lrc: string, target = 'zh-CN'): Promise<string | null> {
   const result = await translateLrcDetailed(lrc, target)
   return result.translated ? result.lrc : null
+}
+
+/**
+ * 用 AI 翻译整首歌词。
+ *
+ * 与公共接口那条链路共用：分句规则、中文短路、本地缓存。
+ * 差别只在「谁来翻」——把待翻的行交给大模型，再把结果按原结构拼回 LRC。
+ *
+ * 缓存键里带上服务商与模型名：换了模型应当允许重新翻一次，
+ * 否则用户换了更好的模型却发现译文还是旧的，会以为是坏的。
+ */
+export async function translateLrcWithAi(
+  lrc: string,
+  cfg: AiConfig,
+  target = 'zh-CN'
+): Promise<{ result: TranslateResult; model: string }> {
+  const lines = parseLrcLines(lrc)
+
+  const indexes: number[] = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const { text } = lines[i]
+    if (!text) continue
+    if (isMetaLine(text)) continue
+    if (!/[\p{L}]/u.test(text)) continue
+    indexes.push(i)
+  }
+
+  if (indexes.length === 0) {
+    return {
+      result: { lrc, translated: false, successCount: 0, totalCount: 0, error: '没有可翻译的歌词内容' },
+      model: cfg.model
+    }
+  }
+
+  const texts = indexes.map((index) => lines[index].text)
+  const source = detectSourceLang(lrc)
+
+  // 已是中文就别麻烦 AI 了
+  if (source === 'zh' && target.toLowerCase().startsWith('zh')) {
+    return {
+      result: {
+        lrc,
+        translated: false,
+        successCount: 0,
+        totalCount: texts.length,
+        error: '歌词已是中文，无需翻译'
+      },
+      model: cfg.model
+    }
+  }
+
+  const cacheKey = `ai:${cfg.baseUrl}:${cfg.model}:${target}`
+  const cached = getCachedTranslation(cacheKey, target, lrc)
+  if (cached) {
+    return {
+      result: {
+        lrc: cached,
+        translated: true,
+        successCount: texts.length,
+        totalCount: texts.length,
+        cached: true
+      },
+      model: cfg.model
+    }
+  }
+
+  const output = await translateLinesWithAi(texts, cfg)
+
+  // 与公共接口同样的判定：以「内容是否真的变了」为准，不拿调用成功冒充翻译成功
+  const merged = [...lines]
+  let changedCount = 0
+  indexes.forEach((lineIndex, i) => {
+    const translated = output.translations[i] ?? lines[lineIndex].text
+    if (normalizeForCompare(translated) !== normalizeForCompare(lines[lineIndex].text)) {
+      changedCount += 1
+    }
+    merged[lineIndex] = { ...lines[lineIndex], text: translated }
+  })
+
+  if (changedCount === 0) {
+    return {
+      result: {
+        lrc,
+        translated: false,
+        successCount: 0,
+        totalCount: texts.length,
+        error: 'AI 返回的译文与原文一致，未产生翻译'
+      },
+      model: output.model
+    }
+  }
+
+  const finalLrc = rebuildLrc(merged)
+  putCachedTranslation(cacheKey, target, lrc, finalLrc)
+
+  const kept = texts.length - changedCount
+  return {
+    result: {
+      lrc: finalLrc,
+      translated: true,
+      successCount: changedCount,
+      totalCount: texts.length,
+      error: kept > 0 ? `${kept} 行与原文一致，已保留原文` : undefined
+    },
+    model: output.model
+  }
 }
 
 /** 对 Lyric 对象做事：返回带翻译的新 Lyric */

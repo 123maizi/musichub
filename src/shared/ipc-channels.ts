@@ -63,7 +63,11 @@ export const CH = {
   appToggleDevTools: 'app:toggleDevTools',
   appMinimize: 'app:minimize',
   appMaximize: 'app:maximize',
-  appClose: 'app:close'
+  appClose: 'app:close',
+  // AI 歌词翻译
+  aiGetConfig: 'ai:getConfig',
+  aiSetConfig: 'ai:setConfig',
+  aiTest: 'ai:test'
 } as const
 
 /** 主进程 → 渲染层 推送通道 */

@@ -12,6 +12,7 @@
  */
 import type { Lyric, LyricTranslateResult, MusicUrlRequest, MusicUrlResult, Song } from '@shared/types/music'
 import type { DownloadAddRequest, DownloadTask } from '@shared/types/download'
+import type { AiConfig, AiTestResult } from '@shared/types/ai'
 
 /**
  * 解包成可结构化克隆的纯数据。
@@ -67,4 +68,21 @@ export function reportBadSource(sourceId: string, song: Song, reason?: string): 
  */
 export function resolveCover(song: Song): Promise<string | null> {
   return window.api.player.resolveCover(toPlain(song))
+}
+
+/* ------------------------------ AI 翻译 ------------------------------ */
+
+/** 读 AI 配置（含 Key，用于设置页回显） */
+export function getAiConfig(): Promise<AiConfig> {
+  return window.api.ai.getConfig()
+}
+
+/** 更新 AI 配置 */
+export function setAiConfig(patch: Partial<AiConfig>): Promise<AiConfig> {
+  return window.api.ai.setConfig(toPlain(patch))
+}
+
+/** 测试 AI 连接；顺带拿回服务端可用模型列表 */
+export function testAi(): Promise<AiTestResult> {
+  return window.api.ai.test()
 }

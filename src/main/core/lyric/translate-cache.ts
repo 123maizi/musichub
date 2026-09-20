@@ -18,6 +18,15 @@ import { dirname, join } from 'node:path'
 /** 最多保留多少条；超出后按最后使用时间淘汰最旧的 */
 const MAX_ENTRIES = 500
 
+/**
+ * 缓存格式版本，参与缓存键的计算。
+ *
+ * 一旦改动「怎么分句、怎么判定成功」这类逻辑就必须递增 ——
+ * 否则旧的（可能是错的）译文会被一直命中，用户升级了版本却还看到老结果，
+ * 会以为新版本没生效。这一版就是因为修了「元信息行被误翻」才加的。
+ */
+const CACHE_VERSION = 2
+
 interface Entry {
   /** 译文 LRC */
   lrc: string
@@ -89,7 +98,9 @@ function persist(): void {
 }
 
 function hashOf(sourceLang: string, target: string, lrc: string): string {
-  return createHash('sha1').update(`${sourceLang}|${target}|${lrc}`).digest('hex')
+  return createHash('sha1')
+    .update(`v${CACHE_VERSION}|${sourceLang}|${target}|${lrc}`)
+    .digest('hex')
 }
 
 /** 取缓存的译文；没有则返回 null */

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import type { AppInfo } from '@shared/types/ipc'
+import { AI_PRESETS, type AiConfig, type AiTestResult } from '@shared/types/ai'
 import { QUALITY_META, QUALITY_ORDER } from '@shared/constants'
 import { useDownloadStore } from '../stores/downloads'
 import { usePlayerStore } from '../stores/player'
 import { useSourceStore } from '../stores/sources'
+import { cleanIpcError } from '../utils/format'
+import { getAiConfig, setAiConfig, testAi } from '../utils/ipc'
 
 const downloads = useDownloadStore()
 const player = usePlayerStore()
@@ -41,12 +44,75 @@ onMounted(async () => {
   await downloads.loadConfig()
   await sources.refresh()
   info.value = await api.app.info()
+  aiCfg.value = await getAiConfig()
 })
 
 async function update(patch: Parameters<typeof downloads.setConfig>[0]): Promise<void> {
   await downloads.setConfig(patch)
   saved.value = true
   setTimeout(() => (saved.value = false), 1600)
+}
+
+/* ------------------------------ AI 歌词翻译 ------------------------------ */
+
+const aiCfg = ref<AiConfig | null>(null)
+/** Key 默认遮起来：设置页偶尔会被别人看到 */
+const aiKeyVisible = ref(false)
+const aiTesting = ref(false)
+const aiTestResult = ref<AiTestResult | null>(null)
+/** 从服务端拉回来的可用模型；拉不到就退回手填 */
+const aiModels = ref<string[]>([])
+
+/** 当前预设的提示文案 */
+const aiPresetHint = computed(() => {
+  const preset = AI_PRESETS.find((p) => p.id === aiCfg.value?.preset)
+  return preset?.hint ?? ''
+})
+
+/** 当前预设是否不需要 Key（本地 Ollama） */
+const aiNoKeyNeeded = computed(
+  () => AI_PRESETS.find((p) => p.id === aiCfg.value?.preset)?.noKey === true
+)
+
+/** 算一下能不能用：三个字段缺一个都不行 */
+const aiReady = computed(() => {
+  const c = aiCfg.value
+  if (!c) return false
+  return Boolean(c.baseUrl.trim() && c.model.trim() && (c.apiKey.trim() || aiNoKeyNeeded.value))
+})
+
+async function updateAi(patch: Partial<AiConfig>): Promise<void> {
+  aiCfg.value = await setAiConfig(patch)
+  saved.value = true
+  setTimeout(() => (saved.value = false), 1600)
+}
+
+/**
+ * 切换服务商。
+ * 顺带把地址与默认模型一起换掉 —— 只换名字不换地址，
+ * 会让人以为「选了 DeepSeek 却还在请求 OpenAI」，是最容易踩的坑。
+ */
+async function applyAiPreset(id: string): Promise<void> {
+  const preset = AI_PRESETS.find((p) => p.id === id)
+  if (!preset) return
+  aiTestResult.value = null
+  aiModels.value = []
+  await updateAi({ preset: id, baseUrl: preset.baseUrl, model: preset.model })
+}
+
+/** 测试连接；成功时顺带把服务端的模型列表填进下拉框 */
+async function runAiTest(): Promise<void> {
+  if (aiTesting.value) return
+  aiTesting.value = true
+  try {
+    const result = await testAi()
+    aiTestResult.value = result
+    if (result.models && result.models.length > 0) aiModels.value = result.models
+  } catch (err) {
+    aiTestResult.value = { ok: false, error: cleanIpcError(err) }
+  } finally {
+    aiTesting.value = false
+  }
 }
 </script>
 
@@ -60,6 +126,166 @@ async function update(patch: Parameters<typeof downloads.setConfig>[0]): Promise
     </header>
 
     <div class="scroll">
+      <!-- ------------------------------ AI 歌词翻译 ------------------------------ -->
+      <div class="group">
+        <div class="group-title">
+          AI 歌词翻译
+          <span v-if="aiCfg?.enabled && aiReady" class="tag accent">已启用</span>
+        </div>
+
+        <div class="field">
+          <label>启用</label>
+          <div class="control col gap-4">
+            <label class="check">
+              <input
+                type="checkbox"
+                :checked="aiCfg?.enabled ?? false"
+                @change="updateAi({ enabled: ($event.target as HTMLInputElement).checked })"
+              />
+              <span>用 AI 翻译歌词（关闭则使用内置的免费翻译接口）</span>
+            </label>
+            <span class="faint note">
+              外语歌在播放页点「翻译歌词」时，优先调用你配置的 AI；失败时按下面的开关决定是否回落到内置翻译。
+            </span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>服务商</label>
+          <div class="control col gap-4">
+            <select
+              :value="aiCfg?.preset ?? 'deepseek'"
+              @change="applyAiPreset(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="p in AI_PRESETS" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+            <span v-if="aiPresetHint" class="faint note">{{ aiPresetHint }}</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>接口地址</label>
+          <div class="control col gap-4">
+            <input
+              class="mono"
+              placeholder="https://api.deepseek.com"
+              :value="aiCfg?.baseUrl ?? ''"
+              @change="updateAi({ baseUrl: ($event.target as HTMLInputElement).value.trim() })"
+            />
+            <span class="faint note">
+              兼容 OpenAI 的 <code class="mono">/chat/completions</code> 接口。填到
+              <code class="mono">/v1</code> 这一层即可，末端的
+              <code class="mono">/chat/completions</code> 会自动补上。
+            </span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>API Key</label>
+          <div class="control row gap-8">
+            <input
+              class="grow mono"
+              :type="aiKeyVisible ? 'text' : 'password'"
+              :placeholder="aiNoKeyNeeded ? '本地部署，可留空' : 'sk-...'"
+              :value="aiCfg?.apiKey ?? ''"
+              @change="updateAi({ apiKey: ($event.target as HTMLInputElement).value.trim() })"
+            />
+            <button class="ghost small" @click="aiKeyVisible = !aiKeyVisible">
+              {{ aiKeyVisible ? '隐藏' : '显示' }}
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>模型</label>
+          <div class="control col gap-4">
+            <div class="row gap-8">
+              <select
+                v-if="aiModels.length > 0"
+                class="grow"
+                :value="aiCfg?.model ?? ''"
+                @change="updateAi({ model: ($event.target as HTMLSelectElement).value })"
+              >
+                <option v-for="m in aiModels" :key="m" :value="m">{{ m }}</option>
+              </select>
+              <input
+                v-else
+                class="grow mono"
+                placeholder="deepseek-flash"
+                :value="aiCfg?.model ?? ''"
+                @change="updateAi({ model: ($event.target as HTMLInputElement).value.trim() })"
+              />
+              <button class="ghost small" :disabled="aiTesting" @click="runAiTest">
+                {{ aiTesting ? '测试中…' : '测试连接' }}
+              </button>
+            </div>
+            <span class="faint note">
+              模型名换代很快，点「测试连接」会顺便拉取服务端的真实模型列表供选择。
+            </span>
+          </div>
+        </div>
+
+        <div v-if="aiTestResult" class="ai-result" :class="aiTestResult.ok ? 'ok' : 'err'">
+          <template v-if="aiTestResult.ok">
+            连接正常<span v-if="aiTestResult.cost">（{{ aiTestResult.cost }}ms）</span>
+            <span v-if="aiModels.length"> · 取到 {{ aiModels.length }} 个可用模型</span>
+          </template>
+          <template v-else>{{ aiTestResult.error }}</template>
+        </div>
+
+        <div class="field">
+          <label>失败时回落</label>
+          <div class="control col gap-4">
+            <label class="check">
+              <input
+                type="checkbox"
+                :checked="aiCfg?.fallbackToPublic ?? true"
+                @change="updateAi({ fallbackToPublic: ($event.target as HTMLInputElement).checked })"
+              />
+              <span>AI 不可用时改用内置免费翻译，并在界面上说明原因</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>目标语言</label>
+          <div class="control col gap-4">
+            <input
+              :value="aiCfg?.targetLanguage ?? '简体中文'"
+              @change="updateAi({ targetLanguage: ($event.target as HTMLInputElement).value.trim() })"
+            />
+            <span class="faint note">
+              填「简体中文」「繁體中文」「English」都可以 —— 这一项会直接写进给模型的提示词。
+            </span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>超时</label>
+          <div class="control row gap-8">
+            <input
+              type="number"
+              min="10"
+              max="300"
+              class="num-input"
+              :value="Math.round((aiCfg?.timeoutMs ?? 60000) / 1000)"
+              @change="updateAi({ timeoutMs: Math.max(10, Number(($event.target as HTMLInputElement).value)) * 1000 })"
+            />
+            <span class="faint">秒</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>说明</label>
+          <div class="control col gap-4">
+            <span class="faint note">
+              API Key 会用系统凭据加密后再存到本机（Windows 上是 DPAPI，绑定当前用户与当前机器），
+              不会明文落盘，也不会随任何请求发往我们之外的第三方 —— 只有你填的这个接口会收到它。
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- ------------------------------ 下载 ------------------------------ -->
       <div class="group">
         <div class="group-title">下载</div>
@@ -376,6 +602,28 @@ input[readonly] {
   padding: 0;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+/* ------------------------------ AI 测试结果 ------------------------------ */
+
+.ai-result {
+  margin: 0 0 4px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.ai-result.ok {
+  background: rgba(76, 168, 106, 0.1);
+  border: 1px solid rgba(76, 168, 106, 0.35);
+  color: #8fd3a4;
+}
+
+.ai-result.err {
+  background: rgba(212, 87, 76, 0.1);
+  border: 1px solid rgba(212, 87, 76, 0.35);
+  color: #e79a92;
 }
 
 /* ------------------------------ 关于 ------------------------------ */

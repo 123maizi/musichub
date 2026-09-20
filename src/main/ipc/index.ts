@@ -8,6 +8,8 @@ import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron'
 import { existsSync } from 'node:fs'
 
 import type { Lyric, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
+import type { AiConfig } from '@shared/types/ai'
+import { AI_PRESETS } from '@shared/types/ai'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
 import type { SourceManager } from '@main/core/source/manager'
@@ -17,7 +19,8 @@ import type { DownloadManager } from '@main/core/download/manager'
 import type { StreamProxy } from '@main/core/proxy/stream-proxy'
 import { probeUrl } from '@main/core/net/http'
 import { resolveCover } from '@main/core/cover'
-import { detectSourceLang, translateLrcDetailed } from '@main/core/lyric/translate'
+import { detectSourceLang, translateLrcDetailed, translateLrcWithAi } from '@main/core/lyric/translate'
+import { testAiConnection } from '@main/core/lyric/ai-translate'
 
 // 通道名唯一定义源在 shared 层，这里引入并原样再导出给外部引用
 import { CH, EV } from '@shared/ipc-channels'
@@ -32,6 +35,8 @@ export interface IpcContext {
   proxy: StreamProxy
   /** 本地音乐库（我的喜欢 / 历史播放 / 歌单） */
   library: import('@main/core/storage/library').LibraryService
+  /** AI 歌词翻译配置 */
+  ai: import('@main/core/storage/ai-config').AiConfigStore
   /** 音源目录 */
   sourceDir: string
   /** 默认下载目录 */
@@ -40,7 +45,7 @@ export interface IpcContext {
 
 /** 注册全部 IPC 处理器，并把服务的推送事件转发到渲染层 */
 export function registerIpc(ctx: IpcContext): void {
-  const { sources, search, resolver, downloads, proxy } = ctx
+  const { sources, search, resolver, downloads, proxy, ai } = ctx
 
   /* ------------------------------ 音源 ------------------------------ */
 
@@ -115,11 +120,101 @@ export function registerIpc(ctx: IpcContext): void {
         totalCount: 0,
         sourceLang: detectSourceLang(main),
         cached: true,
+        provider: 'official' as const,
         error: undefined
       }
     }
 
     const sourceLang = detectSourceLang(main)
+    const cfg = ai.get()
+
+    /**
+     * AI 是否可用。
+     *
+     * 注意关键那一项：**Key 为空时也可能可用** ——
+     * 本地 Ollama 这类服务根本不需要 Key。早先这里的判断是「必须有 Key」，
+     * 结果本地模型永远走不到 AI 分支，用户会以为功能坏了。
+     */
+    const preset = AI_PRESETS.find((p) => p.id === cfg.preset)
+    const keyReady = Boolean(cfg.apiKey.trim()) || preset?.noKey === true
+    const aiReady = cfg.enabled && keyReady && Boolean(cfg.baseUrl.trim()) && Boolean(cfg.model.trim())
+
+    /**
+     * 优先走 AI。
+     *
+     * 顺序是刻意的：AI 译文质量明显更好，而公共接口额度按 IP 算、
+     * 翻几首就见底。AI 失败时（额度不足、网络不通、模型答非所问）
+     * 按配置决定要不要回落到公共接口 —— 宁可给一个次一点的译文，
+     * 也好过让用户点了按钮什么都没发生。
+     */
+    if (aiReady) {
+      try {
+        const aiResult = await translateLrcWithAi(main, cfg)
+        if (aiResult.result.translated) {
+          return {
+            lyric: {
+              ...lyric,
+              tlyric: aiResult.result.lrc,
+              sourceId: `${lyric?.sourceId ?? 'builtin'}+ai`
+            },
+            translated: true,
+            lineCount: aiResult.result.successCount,
+            totalCount: aiResult.result.totalCount,
+            sourceLang,
+            provider: 'ai' as const,
+            providerName: aiResult.model,
+            error: aiResult.result.error
+          }
+        }
+        // AI 没翻动（例如中文短路），如实回报
+        if (!cfg.fallbackToPublic) {
+          return {
+            lyric: null,
+            translated: false,
+            lineCount: 0,
+            totalCount: aiResult.result.totalCount,
+            sourceLang,
+            provider: 'ai' as const,
+            providerName: aiResult.model,
+            error: aiResult.result.error
+          }
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        // AI 挂了：按配置回落到公共接口，并在结果里说明发生了什么
+        if (!cfg.fallbackToPublic) {
+          return {
+            lyric: null,
+            translated: false,
+            lineCount: 0,
+            totalCount: 0,
+            sourceLang,
+            provider: 'ai' as const,
+            error: `AI 翻译失败：${reason}`
+          }
+        }
+        const fallback = await translateLrcDetailed(main, target)
+        return {
+          lyric: fallback.translated
+            ? {
+                ...lyric,
+                tlyric: fallback.lrc,
+                sourceId: `${lyric?.sourceId ?? 'builtin'}+translated`
+              }
+            : null,
+          translated: fallback.translated,
+          lineCount: fallback.successCount,
+          totalCount: fallback.totalCount,
+          sourceLang,
+          provider: 'public' as const,
+          cached: fallback.cached,
+          error: fallback.translated
+            ? `AI 翻译失败（${reason}），已改用内置翻译`
+            : `AI 翻译失败（${reason}）；内置翻译也没成功：${fallback.error ?? '未知原因'}`
+        }
+      }
+    }
+
     const result = await translateLrcDetailed(main, target)
     if (!result.translated) {
       return {
@@ -128,6 +223,7 @@ export function registerIpc(ctx: IpcContext): void {
         lineCount: 0,
         totalCount: result.totalCount,
         sourceLang,
+        provider: 'public' as const,
         error: result.error
       }
     }
@@ -139,11 +235,21 @@ export function registerIpc(ctx: IpcContext): void {
       totalCount: result.totalCount,
       sourceLang,
       cached: result.cached,
+      provider: 'public' as const,
       error: result.error
     }
   })
 
   ipcMain.handle(CH.playProbe, (_e, url: string) => probeUrl(url))
+
+  /* ------------------------------ AI 翻译 ------------------------------ */
+
+  ipcMain.handle(CH.aiGetConfig, () => ai.get())
+
+  ipcMain.handle(CH.aiSetConfig, (_e, patch: Partial<AiConfig>) => ai.set(patch))
+
+  // 测试连接：顺带把服务端的模型列表带回来，界面可以直接给用户选
+  ipcMain.handle(CH.aiTest, () => testAiConnection(ai.get()))
 
   // 渲染层发现音源给了试听片段时会调这里：冷却该源 + 清掉这首歌的缓存
   ipcMain.handle(

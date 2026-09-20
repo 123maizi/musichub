@@ -7,6 +7,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { CH, EV } from '@shared/ipc-channels'
 import type { Lyric, LyricTranslateResult, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
+import type { AiConfig, AiTestResult } from '@shared/types/ai'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
 
@@ -84,6 +85,14 @@ const api = {
       invoke(CH.playReportBadSource, sourceId, song, reason),
     /** 封面补全：平台没给封面时，按「歌名 + 歌手」去别处找一张 */
     resolveCover: (song: Song) => invoke(CH.coverResolve, song)
+  },
+
+  /* ------------------------------ AI 翻译 ------------------------------ */
+  ai: {
+    getConfig: () => invoke(CH.aiGetConfig) as Promise<AiConfig>,
+    setConfig: (patch: Partial<AiConfig>) => invoke(CH.aiSetConfig, patch) as Promise<AiConfig>,
+    /** 测试连通性，顺带拿回服务端的可用模型列表 */
+    test: () => invoke(CH.aiTest) as Promise<AiTestResult>
   },
 
   /* ------------------------------ 下载 ------------------------------ */

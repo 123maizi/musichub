@@ -13,6 +13,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { PLATFORM_META } from '@shared/constants'
+import { splitBrackets, STRONG_VARIANT_WORDS } from '@shared/purity'
 import type { Song } from '@shared/types/music'
 import AppIcon from '../components/AppIcon.vue'
 import SongTable from '../components/SongTable.vue'
@@ -76,38 +77,20 @@ function notify(message: string): void {
 /* ------------------------------ 魔改版本过滤 ------------------------------ */
 
 /**
- * 魔改版本特征词。
+ * 魔改版本过滤。
  *
  * 搜「周杰伦」会涌出大量 DJ 版、伴奏版、串烧 —— 这些不是用户想听的。
  * 做成可关的开关而不是硬过滤：偶尔确实有人想找伴奏，
  * 一刀切掉反而堵死了正当需求。
+ *
+ * 特征词与搜索页的纯净度排序共用一份（@shared/purity），
+ * 但这里只用「强改版词」那一档 —— Live、翻唱、钢琴版属于正常发行，
+ * 搜索里降权就够了，不该直接藏起来不给人看。
  */
-const JUNK_WORDS = [
-  'dj',
-  '伴奏',
-  'karaoke',
-  'ktv',
-  '串烧',
-  '慢摇',
-  '喊麦',
-  '土嗨',
-  '广场舞',
-  '电音版',
-  '加速版',
-  '减速版',
-  '降调',
-  '升调',
-  '魔改',
-  '重低音',
-  '车载',
-  '抖音版',
-  '网红版',
-  '改编版'
-]
-
 function isJunk(song: Song): boolean {
-  const name = song.name.toLowerCase()
-  return JUNK_WORDS.some((word) => name.includes(word))
+  const { brackets, outside } = splitBrackets(song.name)
+  const text = `${outside} ${brackets.join(' ')}`.toLowerCase()
+  return STRONG_VARIANT_WORDS.some((word) => text.includes(word))
 }
 
 /** 是否显示被过滤掉的魔改版本 */
