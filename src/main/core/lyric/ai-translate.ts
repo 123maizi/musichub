@@ -248,6 +248,24 @@ function buildMessages(
   return { system, user }
 }
 
+/**
+ * 译文是否只是把原文抄了一遍。
+ *
+ * 小模型很容易犯这个毛病：格式完全合规、行数也对，但内容就是原文 ——
+ * 尤其当歌词里混了它看不懂的字符时。这种结果必须判为失败，
+ * 否则会一路显示成「翻译成功」，而用户看到的全是外文
+ * —— 这正是「点完翻译不显示译文，只有外文」的来源。
+ */
+function looksLikeEcho(lines: string[], translations: string[]): boolean {
+  if (lines.length === 0) return false
+  const normalize = (s: string): string => s.toLowerCase().replace(/[\s\p{P}]/gu, '')
+  let same = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (normalize(translations[i] ?? '') === normalize(lines[i])) same += 1
+  }
+  return same === lines.length
+}
+
 /** 调一次接口，翻一批 */
 async function translateChunk(
   lines: string[],
@@ -266,19 +284,44 @@ async function translateChunk(
     model: cfg.model,
     temperature: cfg.temperature,
     stream: false,
-    // 安全阀：模型一旦「不会停」，没有上限就会一直生成到把上下文撑爆
-    max_tokens: cfg.maxTokens,
+    /**
+     * token 上限：按这一批的行数动态收紧。
+     *
+     * 固定给个大值会让小模型「空转」—— 实测 2 行翻译生成了 622 个 token、
+     * 耗时 10 秒，而实际只需要几十个 token。按行数给刚好够用的额度，
+     * 既不会把正常输出截断，也能及时刹住跑偏的模型。
+     * 深度思考时放宽：推理本身要吃掉不少 token。
+     */
+    max_tokens: cfg.deepThinking
+      ? Math.max(cfg.maxTokens, 4000)
+      : Math.min(cfg.maxTokens, Math.max(320, lines.length * 60)),
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ]
   }
+
   /**
-   * 关闭思考链。
-   * 这是 Ollama 的扩展字段，兼容 OpenAI 的服务会忽略它；
-   * 但对本地推理模型是必须的 —— 实测不关的话，6 行歌词能生成 1.6 万 token。
+   * 思考链控制。
+   *
+   * 深度思考开着 → 什么都不加，让推理模型尽情推理（更准，但慢）。
+   * 关着 → 显式 think:false 让它直接出结果（快，实测 6 行歌词从
+   * 1.6 万 token 降到 65 token）。这是 Ollama 的扩展字段，
+   * 兼容 OpenAI 的服务会忽略它。
    */
-  if (cfg.disableThinking) payload.think = false
+  if (!cfg.deepThinking && cfg.disableThinking) payload.think = false
+
+  /**
+   * 本地服务才发 keep_alive。
+   *
+   * 这是省时间的关键一招：Ollama 默认空闲几分钟就把模型从显存卸载，
+   * 下次翻译要重新加载权重 —— 实测冷调用 4050ms、热调用 360ms，差 11 倍。
+   * 云端服务（OpenAI 等）不认识这个字段，不发给它们免得报错。
+   */
+  const isLocalEndpoint = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)/i.test(baseUrl)
+  if (isLocalEndpoint && cfg.keepAliveMinutes > 0) {
+    payload.keep_alive = `${Math.round(cfg.keepAliveMinutes)}m`
+  }
 
   let res
   try {
@@ -314,7 +357,7 @@ async function translateChunk(
     : undefined
 
   // 按要求的格式解析；行数不一致一律作废 —— 错位比不翻更糟
-  const translations =
+  let translations =
     format === 'json'
       ? pickTranslations(extractJson(content))
       : parseNumberedLines(content, lines.length)
@@ -333,7 +376,26 @@ async function translateChunk(
     )
   }
 
+  translations = translations.map(sanitizeTranslation)
+
   return { translations, model: String(body.model ?? cfg.model), usage }
+}
+
+/**
+ * 清洗单行译文。
+ *
+ * 模型经常在译文末尾带换行、或者顺手加上引号和编号 ——
+ * 这些杂质拼回 LRC 会变成空行和多余字符，直接破坏歌词显示
+ * （实测译文里带一个 \n，整首歌就多出一堆空行）。
+ */
+function sanitizeTranslation(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    // 模型有时会把「1. 」这样的编号一起吐出来
+    .replace(/^\s*\d+\s*[|｜.、:：]\s*/, '')
+    // 顺手剥掉成对的引号
+    .replace(/^["'“”「」『』]+|["'“”「」『』]+$/g, '')
+    .trim()
 }
 
 /**
@@ -353,8 +415,23 @@ export async function translateLinesWithAi(
   if (!cfg.model.trim()) throw new Error('还没填模型名')
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error('接口地址必须以 http:// 或 https:// 开头')
 
+  /**
+   * 格式尝试顺序。
+   *
+   * 本地小模型优先走行式 —— 它们处理 JSON 字符串转义很吃力，
+   * 实测 4B 模型 JSON 两次挂一次。而且「先试 JSON」的代价不只是失败：
+   * 每次白跑一轮要生成几百个 token、多花近十秒。
+   * 云端大模型反过来，JSON 更规整、更好解析。
+   */
+  const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)/i.test(baseUrl)
   const order: ('json' | 'lines')[] =
-    cfg.outputFormat === 'lines' ? ['lines'] : cfg.outputFormat === 'json' ? ['json'] : ['json', 'lines']
+    cfg.outputFormat === 'lines'
+      ? ['lines']
+      : cfg.outputFormat === 'json'
+        ? ['json']
+        : isLocal
+          ? ['lines', 'json']
+          : ['json', 'lines']
 
   const out: string[] = []
   let model = cfg.model
@@ -369,7 +446,19 @@ export async function translateLinesWithAi(
 
     for (const format of order) {
       try {
-        done = await translateChunk(slice, cfg, baseUrl, song, format)
+        const attempt = await translateChunk(slice, cfg, baseUrl, song, format)
+
+        /**
+         * 抄原文的结果不算成功。
+         * 换一种格式再试一次 —— 实测同一个模型对「JSON」和「行式」
+         * 两种写法的反应完全不同，一种抄原文、另一种就老实翻译。
+         */
+        if (looksLikeEcho(slice, attempt.translations)) {
+          lastError = new Error('AI 把原文原样返回了，没有产生译文')
+          continue
+        }
+
+        done = attempt
         usedFormat = format
         break
       } catch (err) {

@@ -126,6 +126,22 @@ export interface AiConfig {
    */
   disableThinking: boolean
   /**
+   * 深度思考翻译。
+   *
+   * 关（默认）：以速度为先 —— 关掉思考链、token 上限收紧，一秒出结果。
+   * 开：允许模型先推理再翻译，译文更准，但慢好几倍。
+   * 两者互斥：深度思考开着时，关闭思考链这一项自动失效。
+   */
+  deepThinking: boolean
+  /**
+   * 模型常驻时长（分钟）。
+   *
+   * 只对本地服务（Ollama / LM Studio）有意义：它们默认空闲几分钟就把模型
+   * 从显存卸载，下次翻译要重新加载 2.7GB 权重 —— 实测冷调用 4 秒、
+   * 热调用 0.36 秒，差 11 倍。设成 0 表示不常驻。
+   */
+  keepAliveMinutes: number
+  /**
    * 单次回复的 token 上限。
    * 这是安全阀：模型一旦「不会停」，没有上限就会一直生成到把上下文撑爆
    * （实测跑满 4 分 43 秒后报错）。歌词翻译几百 token 足够。
@@ -153,6 +169,8 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   fallbackToPublic: true,
   targetLanguage: '简体中文',
   disableThinking: false,
+  deepThinking: false,
+  keepAliveMinutes: 30,
   maxTokens: 1500,
   outputFormat: 'auto'
 }

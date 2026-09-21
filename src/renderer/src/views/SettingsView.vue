@@ -248,12 +248,51 @@ async function runAiTest(): Promise<void> {
         </div>
 
         <div class="field">
+          <label>深度思考翻译</label>
+          <div class="control col gap-4">
+            <label class="check">
+              <input
+                type="checkbox"
+                :checked="aiCfg?.deepThinking ?? false"
+                @change="updateAi({ deepThinking: ($event.target as HTMLInputElement).checked })"
+              />
+              <span>开启：慢一些，但译文更准（允许模型先推理再翻）</span>
+            </label>
+            <span class="faint note">
+              关闭时以速度为先：关掉思考链、token 上限收紧，本地模型一两秒就出结果。
+              开启后会留给模型推理的空间，同一首歌可能要十几秒到几十秒，换来更准的译文。
+            </span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>模型常驻</label>
+          <div class="control row gap-8">
+            <input
+              type="number"
+              min="0"
+              max="1440"
+              step="5"
+              class="num-input"
+              :value="aiCfg?.keepAliveMinutes ?? 30"
+              @change="updateAi({ keepAliveMinutes: Math.max(0, Number(($event.target as HTMLInputElement).value)) })"
+            />
+            <span class="faint">分钟（0 = 不常驻）</span>
+          </div>
+          <span class="faint note">
+            只对本地服务有效。默认空闲几分钟就把模型从显存卸载，下次翻译要重新加载权重 ——
+            实测冷启动 4.0 秒、常驻后 0.36 秒，差 11 倍。
+          </span>
+        </div>
+
+        <div class="field">
           <label>思考链</label>
           <div class="control col gap-4">
             <label class="check">
               <input
                 type="checkbox"
                 :checked="aiCfg?.disableThinking ?? false"
+                :disabled="aiCfg?.deepThinking ?? false"
                 @change="updateAi({ disableThinking: ($event.target as HTMLInputElement).checked })"
               />
               <span>关闭思考链（本地推理模型建议勾上）</span>
@@ -261,6 +300,7 @@ async function runAiTest(): Promise<void> {
             <span class="faint note">
               本地模型（qwen3 这类）默认会先写一大段思维链再回答 —— 实测 6 行歌词能生成
               1.6 万 token，把上下文撑爆、几分钟才返回。勾上之后 1 秒出结果。
+              <template v-if="aiCfg?.deepThinking">（深度思考已开启，这一项暂时不生效）</template>
             </span>
           </div>
         </div>

@@ -63,6 +63,8 @@ export const usePlayerStore = defineStore('player', () => {
   const savedEdited = ref(false)
   /** 译文来源：ai / public / official / manual */
   const savedProvider = ref('')
+  /** AI 的话记下模型名，界面显示「本歌词由 xxx 翻译」 */
+  const savedProviderName = ref('')
 
   /* ------------------------------ 译文编辑 ------------------------------ */
 
@@ -338,6 +340,7 @@ export const usePlayerStore = defineStore('player', () => {
     translatedSongId.value = ''
     savedEdited.value = false
     savedProvider.value = ''
+    savedProviderName.value = ''
     // 切歌时把编辑器关掉，免得把上一首的编辑内容留在界面上
     editing.value = false
     editLines.value = []
@@ -395,6 +398,7 @@ export const usePlayerStore = defineStore('player', () => {
       translatedSongId.value = translated.value ? song.id : ''
       savedEdited.value = false
       savedProvider.value = lyric.tlyric?.trim() ? 'official' : ''
+      savedProviderName.value = ''
 
       /**
        * 平台没给翻译时，看看之前有没有翻过这首。
@@ -411,6 +415,7 @@ export const usePlayerStore = defineStore('player', () => {
           translatedSongId.value = song.id
           savedEdited.value = saved.edited
           savedProvider.value = saved.provider
+          savedProviderName.value = saved.providerName ?? ''
         }
       }
     } catch {
@@ -460,6 +465,8 @@ export const usePlayerStore = defineStore('player', () => {
       // 结果已由主进程按歌曲 id 存好，这里同步一下状态即可
       savedEdited.value = false
       savedProvider.value = result.provider ?? 'ai'
+      // 记下模型名：界面要显示「本歌词由 deepseek-chat 翻译」
+      savedProviderName.value = result.providerName ?? ''
       return true
     } catch (err) {
       translateError.value = cleanIpcError(err)
@@ -617,6 +624,7 @@ export const usePlayerStore = defineStore('player', () => {
         translated.value = false
         savedEdited.value = false
         savedProvider.value = ''
+        savedProviderName.value = ''
         closeEditor()
         return true
       }
@@ -656,6 +664,7 @@ export const usePlayerStore = defineStore('player', () => {
     translatedSongId.value = translated.value ? song.id : ''
     savedEdited.value = false
     savedProvider.value = translated.value ? 'official' : ''
+    savedProviderName.value = ''
   }
 
   /* ------------------------------ 上下一首 ------------------------------ */
@@ -796,6 +805,7 @@ export const usePlayerStore = defineStore('player', () => {
     showTranslation,
     savedEdited,
     savedProvider,
+    savedProviderName,
     editing,
     editLines,
     savingEdit,

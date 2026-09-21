@@ -70,14 +70,18 @@ const translateTitle = computed(() =>
   player.translated ? '点击切换译文显示' : '把外语歌词翻成中文'
 )
 
-/** 译文来源，显示给用户看（AI 的话带上模型名） */
+/**
+ * 译文来源标签。
+ * 用 AI 翻的时候直接报出模型名 —— 用户想知道自己配的那个模型到底有没有在工作。
+ */
 const providerLabel = computed(() => {
-  if (player.savedEdited) return '手工修改'
+  if (player.savedEdited) return '已手工修改'
   const src = player.savedProvider
-  if (src === 'manual') return '手工填写'
-  if (src === 'official') return '平台'
-  if (src === 'public') return '内置翻译'
-  return 'AI'
+  if (src === 'manual') return '本歌词由你自己填写'
+  if (src === 'official') return '本歌词来自平台官方翻译'
+  if (src === 'public') return '本歌词由内置翻译提供'
+  const model = player.savedProviderName
+  return model ? `本歌词由 ${model} 翻译` : '本歌词由 AI 翻译'
 })
 
 /** 已经翻过就不重复请求（翻译接口有配额），只切换显示 */
@@ -407,7 +411,7 @@ function queueCurrent(): void {
           </button>
 
           <span v-if="player.savedEdited" class="translate-note">已手工修改</span>
-          <span v-else-if="providerLabel" class="translate-note">由 {{ providerLabel }} 翻译</span>
+          <span v-else-if="providerLabel" class="translate-note">{{ providerLabel }}</span>
           <span v-if="player.translateError" class="translate-note ellipsis">
             {{ player.translateError }}
           </span>

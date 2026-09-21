@@ -16,6 +16,16 @@ export interface TagInput {
   title: string
   artist: string
   album: string
+  /**
+   * 专辑艺术家。
+   * 播放器按它归类专辑 —— 多条歌手合唱时，用主歌手当专辑艺术家
+   * 才不会把一张专辑拆成好几张。
+   */
+  albumArtist?: string
+  /** 音轨号（平台给得出就写） */
+  track?: number
+  /** 年份（平台给得出就写） */
+  year?: number
   /** 封面地址，会下载后内嵌 */
   coverUrl?: string
   comment?: string
@@ -43,6 +53,11 @@ export async function writeAudioTag(filePath: string, tag: TagInput): Promise<vo
       return
     case 'flac':
       writeFlacTags(filePath, tag, cover, coverMime)
+      return
+    case 'm4a':
+    case 'mp4':
+    case 'aac':
+      writeMp4Tags(filePath, tag, cover, coverMime)
       return
     default:
       throw new Error(`暂不支持写入 .${ext} 的标签`)
@@ -204,6 +219,10 @@ function writeId3v23(
     textFrame('TIT2', tag.title),
     textFrame('TPE1', tag.artist),
     textFrame('TALB', tag.album),
+    // TPE2 专辑艺术家：播放器按它归类专辑，不写的话合唱曲会散成一堆
+    textFrame('TPE2', tag.albumArtist ?? tag.artist),
+    textFrame('TRCK', tag.track ? String(tag.track) : ''),
+    textFrame('TYER', tag.year ? String(tag.year) : ''),
     commentFrame(tag.comment ?? ''),
     cover ? apicFrame(cover, coverMime) : null
   ].filter((f): f is Buffer => f !== null)
@@ -229,6 +248,9 @@ function buildVorbisComment(tag: TagInput): Buffer {
     ['TITLE', tag.title],
     ['ARTIST', tag.artist],
     ['ALBUM', tag.album],
+    ['ALBUMARTIST', tag.albumArtist ?? tag.artist],
+    ['TRACKNUMBER', tag.track ? String(tag.track) : ''],
+    ['DATE', tag.year ? String(tag.year) : ''],
     ['COMMENT', tag.comment ?? '']
   ].filter(([, v]) => Boolean(v)) as [string, string][]
 
@@ -321,4 +343,329 @@ function writeFlacTags(
   chunks.push(audio)
 
   writeFileSync(filePath, Buffer.concat(chunks))
+}
+
+/* ------------------------------------------------------------------ *
+ * MP4 / M4A（udta.meta.ilst）
+ * ------------------------------------------------------------------ */
+
+/** 构造一个 MP4 盒子 */
+function box(type: string, payload: Buffer): Buffer {
+  const header = Buffer.alloc(8)
+  header.writeUInt32BE(payload.length + 8, 0)
+  header.write(type, 4, 'latin1')
+  return Buffer.concat([header, payload])
+}
+
+/** ilst 里的一个条目：data 盒里放 UTF-8 文本 */
+function ilstText(type: string, value: string): Buffer {
+  const data = Buffer.alloc(8 + Buffer.byteLength(value, 'utf8'))
+  data.writeUInt32BE(1, 0) // 类型 1 = UTF-8 文本
+  data.writeUInt32BE(0, 4) // 语言/保留
+  data.write(value, 8, 'utf8')
+  return box(type, data)
+}
+
+/** ilst 里的封面条目（类型 13 = JPEG，14 = PNG） */
+function ilstCover(cover: Buffer, mime: string): Buffer {
+  const typeFlag = mime.includes('png') ? 14 : 13
+  const data = Buffer.alloc(8 + cover.length)
+  data.writeUInt32BE(typeFlag, 0)
+  data.writeUInt32BE(0, 4)
+  cover.copy(data, 8)
+
+  // covr 里的 data 盒没有额外层级，直接就是 box('data', ...)
+  const inner = Buffer.alloc(8 + data.length)
+  inner.writeUInt32BE(data.length + 8, 0)
+  inner.write('data', 4, 'latin1')
+  data.copy(inner, 8)
+
+  return box('covr', inner)
+}
+
+interface Mp4BoxRef {
+  offset: number
+  size: number
+  /** 父盒子在 size 字段里的位置（32 位长度） */
+  sizeFieldAt: number
+}
+
+/** 沿着 moov → udta → meta → ilst 找出标签相关盒子的位置 */
+function locateMp4TagPath(buf: Buffer): {
+  moov: Mp4BoxRef
+  udta: Mp4BoxRef | null
+  meta: Mp4BoxRef | null
+  ilst: Mp4BoxRef | null
+  mdatOffset: number
+} | null {
+  // 顶层：找 moov 与 mdat
+  let moov: Mp4BoxRef | null = null
+  let mdatOffset = -1
+  let pos = 0
+  while (pos + 8 <= buf.length) {
+    const size = buf.readUInt32BE(pos)
+    const type = buf.toString('latin1', pos + 4, pos + 8)
+    if (size === 1) return null // 64 位长度，出于安全直接放弃
+    if (size < 8 || pos + size > buf.length) break
+    if (type === 'moov') moov = { offset: pos, size, sizeFieldAt: pos }
+    if (type === 'mdat') mdatOffset = pos
+    pos += size
+  }
+  if (!moov) return null
+
+  /** 在给定父盒子里找子盒子 */
+  const childOf = (parent: Mp4BoxRef, type: string, headerSize = 8): Mp4BoxRef | null => {
+    let p = parent.offset + headerSize
+    const end = parent.offset + parent.size
+    while (p + 8 <= end) {
+      const size = buf.readUInt32BE(p)
+      const kind = buf.toString('latin1', p + 4, p + 8)
+      if (size === 1) return null
+      if (size < 8 || p + size > end) break
+      if (kind === type) return { offset: p, size, sizeFieldAt: p }
+      p += size
+    }
+    return null
+  }
+
+  const udta = childOf(moov, 'udta')
+  // meta 是「全盒」：8 字节头之后再跟 4 字节版本/标志，所以子元素从 +12 开始
+  const meta = udta ? childOf(udta, 'meta', 12) : null
+  const ilst = meta ? childOf(meta, 'ilst', 12) : null
+
+  return { moov, udta, meta, ilst, mdatOffset }
+}
+
+/** ilst 条目的类型名 */
+const MP4_TEXT_KEYS: Record<string, keyof TagInput> = {
+  '\xa9nam': 'title',
+  '\xa9ART': 'artist',
+  '\xa9alb': 'album',
+  'aART': 'albumArtist',
+  '\xa9day': 'year',
+  '\xa9cmt': 'comment'
+}
+
+/**
+ * 写入 MP4/M4A 标签。
+ *
+ * 现实情况是「文件里往往已经有标签」—— 实测这个 m4a 已有
+ * udta>meta>ilst（标题/歌手/专辑齐全，只是没封面）。
+ * 所以做法不是「再套一层」，而是**重建 ilst**：保留我们不认识的条目
+ * （比如 `----` 自由格式项），把我们管的字段换成新值，缺的补上，
+ * 然后同步更新所有祖先盒子的长度，并按差值修正 chunk 偏移。
+ */
+function writeMp4Tags(
+  filePath: string,
+  tag: TagInput,
+  cover: Buffer | undefined,
+  coverMime: string
+): void {
+  const original = readFileSync(filePath)
+
+  if (original.toString('latin1', 4, 8) !== 'ftyp') {
+    throw new Error('不是有效的 MP4/M4A 文件')
+  }
+
+  const path = locateMp4TagPath(original)
+  if (!path) throw new Error('MP4 结构无法安全解析（可能是分片 MP4 或 64 位长度），已跳过标签写入')
+
+  // 组装我们要写入的条目
+  const wanted: Buffer[] = [
+    ilstText('\xa9nam', tag.title),
+    ilstText('\xa9ART', tag.artist),
+    ilstText('\xa9alb', tag.album),
+    ilstText('aART', tag.albumArtist ?? tag.artist)
+  ]
+  if (tag.year) wanted.push(ilstText('\xa9day', String(tag.year)))
+  if (tag.comment) wanted.push(ilstText('\xa9cmt', tag.comment))
+  if (cover) wanted.push(ilstCover(cover, coverMime))
+
+  // 保留我们不认识的旧条目（自由格式、歌词等），别把人家原有信息抹掉
+  const keep: Buffer[] = []
+  if (path.ilst) {
+    let p = path.ilst.offset + 8
+    const end = path.ilst.offset + path.ilst.size
+    while (p + 8 <= end) {
+      const size = original.readUInt32BE(p)
+      const kind = original.toString('latin1', p + 4, p + 8)
+      if (size < 8 || p + size > end) break
+      const managed =
+        Object.keys(MP4_TEXT_KEYS).some((k) => k === kind) || kind === 'covr'
+      if (!managed) keep.push(original.subarray(p, p + size))
+      p += size
+    }
+  }
+
+  const newIlst = box('ilst', Buffer.concat([...keep, ...wanted]))
+
+  /**
+   * 决定插入/替换的位置，并算出「文件长度变化量」。
+   *
+   *   A. 已有 ilst → 原地替换
+   *   B. 有 meta 没 ilst → 往 meta 里插一个
+   *   C. 有 udta 没 meta → 往 udta 里插 meta
+   *   D. 什么都没有 → 往 moov 末尾插 udta
+   */
+  let insertAt: number
+  let removeLength: number
+  let insertion: Buffer
+  let ancestors: Mp4BoxRef[]
+
+  if (path.ilst && path.meta && path.udta) {
+    insertAt = path.ilst.offset
+    removeLength = path.ilst.size
+    insertion = newIlst
+    ancestors = [path.meta, path.udta, path.moov]
+  } else if (path.meta && path.udta) {
+    insertAt = path.meta.offset + path.meta.size
+    removeLength = 0
+    insertion = newIlst
+    ancestors = [path.meta, path.udta, path.moov]
+  } else if (path.udta) {
+    const meta = box(
+      'meta',
+      Buffer.concat([
+        Buffer.alloc(4),
+        box(
+          'hdlr',
+          Buffer.concat([
+            Buffer.alloc(8),
+            Buffer.from('mdir', 'latin1'),
+            Buffer.from('appl', 'latin1'),
+            Buffer.alloc(9)
+          ])
+        ),
+        newIlst
+      ])
+    )
+    insertAt = path.udta.offset + path.udta.size
+    removeLength = 0
+    insertion = meta
+    ancestors = [path.udta, path.moov]
+  } else {
+    const udta = box(
+      'udta',
+      box(
+        'meta',
+        Buffer.concat([
+          Buffer.alloc(4),
+          box(
+            'hdlr',
+            Buffer.concat([
+              Buffer.alloc(8),
+              Buffer.from('mdir', 'latin1'),
+              Buffer.from('appl', 'latin1'),
+              Buffer.alloc(9)
+            ])
+          ),
+          newIlst
+        ])
+      )
+    )
+    insertAt = path.moov.offset + path.moov.size
+    removeLength = 0
+    insertion = udta
+    ancestors = [path.moov]
+  }
+
+  const delta = insertion.length - removeLength
+
+  // 拼出新文件
+  const out = Buffer.concat([
+    original.subarray(0, insertAt),
+    insertion,
+    original.subarray(insertAt + removeLength)
+  ])
+
+  // 祖先盒子的长度都要跟着变（它们把新内容包在里面了）
+  for (const a of ancestors) {
+    out.writeUInt32BE(a.size + delta, a.sizeFieldAt)
+  }
+
+  /**
+   * 修正 chunk 偏移。
+   * 只有 mdat 排在 moov 之后时才需要 —— 那时 mdat 整体后移了 delta 字节，
+   * 而 stco 里存的是绝对偏移，不修正就会读到错位的数据（文件直接播不了）。
+   */
+  if (path.mdatOffset > path.moov.offset && delta !== 0) {
+    shiftChunkOffsets(out, delta)
+  }
+
+  // 自检：第一个 chunk 必须落在文件内，否则宁可放弃
+  const firstOffset = readFirstChunkOffset(out)
+  if (firstOffset !== null && (firstOffset < 0 || firstOffset >= out.length)) {
+    throw new Error('偏移修正自检未通过，已放弃写入标签（原文件未被修改）')
+  }
+
+  writeFileSync(filePath, out)
+}
+
+/**
+ * 修正 chunk 偏移表。
+ *
+ * 为什么必须做：moov 通常在 mdat 之前（faststart 布局），往 moov 里插标签
+ * 会把后面所有数据往后推，而 stco/co64 里存的是**绝对文件偏移** ——
+ * 不修正的话，播放器按旧偏移去读，读到的就是错位的数据。
+ * 这正是「加了标签之后文件打不开」的典型原因。
+ */
+function shiftChunkOffsets(data: Buffer, delta: number): void {
+  // 遍历 moov 里所有 trak/mdia/minf/stbl/stco|co64
+  const visit = (from: number, to: number): void => {
+    let pos = from
+    while (pos + 8 <= to) {
+      const size = data.readUInt32BE(pos)
+      const type = data.toString('latin1', pos + 4, pos + 8)
+      if (size < 8 || pos + size > to) break
+
+      if (type === 'stco') {
+        const count = data.readUInt32BE(pos + 12)
+        for (let i = 0; i < count; i += 1) {
+          const at = pos + 16 + i * 4
+          if (at + 4 > pos + size) break
+          data.writeUInt32BE(data.readUInt32BE(at) + delta, at)
+        }
+      } else if (type === 'co64') {
+        const count = data.readUInt32BE(pos + 12)
+        for (let i = 0; i < count; i += 1) {
+          const at = pos + 16 + i * 8
+          if (at + 8 > pos + size) break
+          data.writeBigUInt64BE(data.readBigUInt64BE(at) + BigInt(delta), at)
+        }
+      } else if (['moov', 'trak', 'mdia', 'minf', 'stbl', 'udta', 'meta'].includes(type)) {
+        // meta 盒在 QuickTime 里前 4 字节是版本号，偏移要加 4
+        const childStart = pos + (type === 'meta' ? 12 : 8)
+        if (childStart < pos + size) visit(childStart, pos + size)
+      }
+
+      pos += size
+    }
+  }
+  visit(0, data.length)
+}
+
+/** 读出第一个 chunk 偏移，用于自检 */
+function readFirstChunkOffset(data: Buffer): number | null {
+  let found: number | null = null
+  const visit = (from: number, to: number): void => {
+    if (found !== null) return
+    let pos = from
+    while (pos + 8 <= to) {
+      const size = data.readUInt32BE(pos)
+      const type = data.toString('latin1', pos + 4, pos + 8)
+      if (size < 8 || pos + size > to) break
+      if (type === 'stco') {
+        const count = data.readUInt32BE(pos + 12)
+        if (count > 0) found = data.readUInt32BE(pos + 16)
+        return
+      }
+      if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(type)) {
+        visit(pos + 8, pos + size)
+      }
+      pos += size
+      if (found !== null) return
+    }
+  }
+  visit(0, data.length)
+  return found
 }

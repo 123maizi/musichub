@@ -11,7 +11,17 @@
  * 播放不了的自然也下载不了，行为一致。
  */
 import { EventEmitter } from 'node:events'
-import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import {
+  closeSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync
+} from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -29,6 +39,8 @@ import {
 import type { MusicResolver } from '../source/resolver'
 import type { JsonStore } from '../storage/store'
 import { writeAudioTag } from './tag-writer'
+import { describeNonAudio, extMismatch, sniffAudioFormat } from './audio-format'
+import { resolveCover } from '../cover'
 
 export interface DownloadManagerDeps {
   resolver: MusicResolver
@@ -358,20 +370,102 @@ export class DownloadManager extends EventEmitter {
     if (existsSync(task.savePath)) rmSync(task.savePath, { force: true })
     renameSync(partPath, task.savePath)
 
+    /**
+     * 3.5) 校验「下下来的确实是音频」。
+     *
+     * 音源出问题时，返回的地址可能指向一个网页、一段 JSON 或空响应 ——
+     * 这些内容照样会被写进文件、任务照样显示「已完成」，
+     * 直到用户去播放才发现「文件损坏」。那时候已经晚了。
+     * 所以这里按文件头指纹检查，不合格就判失败并删掉文件，
+     * 宁可明确报错，也不留一个假装成功的坏文件。
+     */
+    const head = this.readHead(task.savePath, 64)
+    const format = sniffAudioFormat(head)
+    if (!format) {
+      try {
+        rmSync(task.savePath, { force: true })
+      } catch {
+        /* 删不掉也不影响结论 */
+      }
+      throw new Error(`下到的内容不是音频（已删除）：${describeNonAudio(head)}`)
+    }
+
+    // 扩展名与真实格式不符时纠正一下，免得播放器按扩展名解码失败
+    const mismatch = extMismatch(task.savePath.split('.').pop() ?? '', format)
+    if (mismatch) {
+      this.deps.onLog?.('warn', 'download', `${task.fileName}: ${mismatch}，已按真实格式改正`)
+      const fixed = task.savePath.replace(/\.[^.\\/]+$/, `.${format.ext}`)
+      if (fixed !== task.savePath) {
+        try {
+          renameSync(task.savePath, fixed)
+          task.savePath = fixed
+          task.fileName = task.fileName.replace(/\.[^.\\/]+$/, `.${format.ext}`)
+        } catch {
+          /* 改名失败不致命，文件内容是对的 */
+        }
+      }
+    }
+
     // 4) 写标签（失败不影响下载结果）
     if (task.writeTag && config.writeTag) {
       try {
+        /**
+         * 平台没给封面时，跨平台补一张再嵌进去。
+         * 酷我等平台的搜索结果本来就常常没有封面地址 ——
+         * 不补的话下载下来的文件在播放器里就是一片空白。
+         */
+        let coverUrl = task.song.picUrl
+        if (config.downloadCover && !coverUrl) {
+          try {
+            const found = await resolveCover(task.song)
+            if (found) {
+              coverUrl = found
+              this.deps.onLog?.('info', 'download', `${task.fileName}: 平台没给封面，已补一张`)
+            }
+          } catch {
+            /* 补不到就不嵌封面 */
+          }
+        }
+
         await writeAudioTag(task.savePath, {
           title: task.song.name,
           artist: task.song.singer,
           album: task.song.albumName,
-          coverUrl: config.downloadCover ? task.song.picUrl : undefined,
+          // 专辑艺术家用主歌手：合唱曲才不会把一张专辑拆成好几张
+          albumArtist: String(task.song.singer ?? '').split(/[&、/]/)[0]?.trim() || task.song.singer,
+          year: this.pickYear(task.song),
+          coverUrl: config.downloadCover ? coverUrl : undefined,
           comment: `MusicHub · ${PLATFORM_META[task.song.platform]?.name ?? task.song.platform}`
         })
       } catch (err) {
         this.deps.onLog?.('warn', 'download', `写入标签失败（不影响文件）: ${errMsg(err)}`)
       }
     }
+  }
+
+  /** 读文件开头若干字节，用于格式校验 */
+  private readHead(filePath: string, bytes: number): Buffer {
+    try {
+      const fd = openSync(filePath, 'r')
+      const buf = Buffer.alloc(bytes)
+      const read = readSync(fd, buf, 0, bytes, 0)
+      closeSync(fd)
+      return read === bytes ? buf : buf.subarray(0, Math.max(0, read))
+    } catch {
+      return Buffer.alloc(0)
+    }
+  }
+
+  /** 从平台原始字段里碰运气找年份（各平台字段名不统一） */
+  private pickYear(song: Song): number | undefined {
+    const raw = (song.raw ?? {}) as Record<string, unknown>
+    const candidates = [raw.publishTime, raw.releaseDate, raw.pubtime, raw.year, raw.issue]
+    for (const c of candidates) {
+      const text = typeof c === 'string' ? c : typeof c === 'number' ? String(c) : ''
+      const m = /(19|20)\d{2}/.exec(text)
+      if (m) return Number(m[0])
+    }
+    return undefined
   }
 
   /** 流式写入文件，带断点续传与进度上报 */

@@ -195,7 +195,14 @@ export function registerIpc(ctx: IpcContext): void {
             error: aiResult.result.error
           }
         }
-        // AI 没翻动（例如中文短路），如实回报
+        /**
+         * AI 没能翻动（例如它把原文原样抄了回来、或中文短路）。
+         *
+         * 这里绝不能静默溜到下面的内置翻译分支 —— 那样用户只会看到
+         * 「点完翻译什么都没有」，完全不知道发生了什么。
+         * 无论走哪条路，都要带上一句说明。
+         */
+        const aiReason = aiResult.result.error ?? 'AI 没有产生译文'
         if (!cfg.fallbackToPublic) {
           return {
             lyric: null,
@@ -205,8 +212,28 @@ export function registerIpc(ctx: IpcContext): void {
             sourceLang,
             provider: 'ai' as const,
             providerName: aiResult.model,
-            error: aiResult.result.error
+            error: `AI 没能翻译这首歌：${aiReason}`
           }
+        }
+        const afterAi = await translateLrcDetailed(main, target)
+        if (afterAi.translated) remember(afterAi.lrc, 'public')
+        return {
+          lyric: afterAi.translated
+            ? {
+                ...lyric,
+                tlyric: afterAi.lrc,
+                sourceId: `${lyric?.sourceId ?? 'builtin'}+translated`
+              }
+            : null,
+          translated: afterAi.translated,
+          lineCount: afterAi.successCount,
+          totalCount: afterAi.totalCount,
+          sourceLang,
+          provider: 'public' as const,
+          cached: afterAi.cached,
+          error: afterAi.translated
+            ? `AI 没能翻译（${aiReason}），已改用内置翻译`
+            : `AI 没能翻译（${aiReason}）；内置翻译也没成功：${afterAi.error ?? '未知原因'}`
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
