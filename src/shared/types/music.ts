@@ -136,6 +136,10 @@ export interface LyricTranslateResult {
   error?: string
   /** 是否直接命中本地缓存（没有消耗翻译接口的公共额度） */
   cached?: boolean
+  /** 译文来源：ai（大模型）/ public（内置免费接口）/ official（平台自带） */
+  provider?: 'ai' | 'public' | 'official' | 'manual'
+  /** AI 的话记下模型名，界面上可以显示「由 xxx 翻译」 */
+  providerName?: string
 }
 
 /** 搜索结果（按平台分组） */

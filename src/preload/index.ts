@@ -7,7 +7,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { CH, EV } from '@shared/ipc-channels'
 import type { Lyric, LyricTranslateResult, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
-import type { AiConfig, AiTestResult } from '@shared/types/ai'
+import type { AiConfig, AiTestResult, SavedTranslation } from '@shared/types/ai'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
 
@@ -73,9 +73,13 @@ const api = {
     getUrl: (req: MusicUrlRequest) => invoke(CH.playGetUrl, req),
     getLyric: (song: Song, sourceIds?: string[]) =>
       invoke(CH.playGetLyric, song, sourceIds) as Promise<Lyric | null>,
-    /** 歌词翻译（外语歌没有官方翻译时用） */
-    translateLyric: (lyric: Lyric, target?: string) =>
-      invoke(CH.playTranslateLyric, lyric, target) as Promise<LyricTranslateResult>,
+    /**
+     * 歌词翻译（外语歌没有官方翻译时用）。
+     * 带上 song 是为了把歌名/歌手/专辑一并告诉 AI —— 模型知道在翻哪首歌，
+     * 人名与专有名词会准得多。
+     */
+    translateLyric: (lyric: Lyric, target?: string, song?: Song) =>
+      invoke(CH.playTranslateLyric, lyric, target, song) as Promise<LyricTranslateResult>,
     probe: (url: string) => invoke(CH.playProbe, url),
     /**
      * 上报音源质量问题（例如只返回试听片段）。
@@ -92,7 +96,14 @@ const api = {
     getConfig: () => invoke(CH.aiGetConfig) as Promise<AiConfig>,
     setConfig: (patch: Partial<AiConfig>) => invoke(CH.aiSetConfig, patch) as Promise<AiConfig>,
     /** 测试连通性，顺带拿回服务端的可用模型列表 */
-    test: () => invoke(CH.aiTest) as Promise<AiTestResult>
+    test: () => invoke(CH.aiTest) as Promise<AiTestResult>,
+    /** 读已保存的译文：切歌回来、重启后都还在 */
+    getSaved: (songId: string) => invoke(CH.lyricSavedGet, songId) as Promise<SavedTranslation | null>,
+    /** 保存译文（手工编辑时 edited 传 true，此后不再被自动翻译覆盖） */
+    saveTranslation: (entry: SavedTranslation) =>
+      invoke(CH.lyricSavedSet, entry) as Promise<SavedTranslation>,
+    /** 删掉译文，相当于「重新翻一遍」 */
+    deleteSaved: (songId: string) => invoke(CH.lyricSavedDelete, songId)
   },
 
   /* ------------------------------ 下载 ------------------------------ */

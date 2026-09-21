@@ -25,6 +25,13 @@ import { httpRequest } from '../net/http'
 /** 单次请求最多翻多少行（超长歌词分片，避免被截断） */
 const MAX_LINES_PER_CHUNK = 60
 
+/** 传给模型的歌曲信息 —— 有上下文，译文明显更准 */
+export interface SongContext {
+  name?: string
+  singer?: string
+  album?: string
+}
+
 export interface AiTranslationOutput {
   /** 与输入等长的译文数组 */
   translations: string[]
@@ -34,6 +41,8 @@ export interface AiTranslationOutput {
   usage?: { prompt: number; completion: number }
   /** 分片数量，便于界面说明「翻了 N 批」 */
   chunks: number
+  /** 实际生效的输出格式（auto 模式下可能是回退后的行式） */
+  format: 'json' | 'lines'
 }
 
 /**
@@ -159,11 +168,70 @@ function pickTranslations(parsed: unknown): string[] | null {
   return null
 }
 
+/**
+ * 组装歌曲信息行。
+ *
+ * 把歌名 / 歌手 / 专辑告诉模型，译文会明显更准 ——
+ * 没有上下文时，模型不知道「Imagine」是歌名还是动词，
+ * 也不知道整首歌唱的是什么，只能一行一行硬译。
+ */
+function songInfoLine(song?: SongContext): string {
+  if (!song) return ''
+  const parts: string[] = []
+  if (song.name) parts.push(`《${song.name}》`)
+  if (song.singer) parts.push(`演唱：${song.singer}`)
+  if (song.album) parts.push(`专辑：《${song.album}》`)
+  if (parts.length === 0) return ''
+  return `这首歌是 ${parts.join('，')}。请结合这个背景来翻译，让人名、专有名词更准确。`
+}
+
+/** 行式解析：「序号|译文」，对不擅长 JSON 的小模型友好得多 */
+function parseNumberedLines(content: string, expected: number): string[] | null {
+  const rows: { index: number; text: string }[] = []
+  for (const raw of content.split('\n')) {
+    const m = /^\s*(\d+)\s*[|｜.、:：]\s*(.+?)\s*$/.exec(raw)
+    if (m) rows.push({ index: Number(m[1]), text: m[2] })
+  }
+  if (rows.length !== expected) return null
+  // 序号必须从 1 开始严格递增：顺序错了，贴回歌词就会整体错位
+  for (let i = 0; i < rows.length; i += 1) {
+    if (rows[i].index !== i + 1) return null
+  }
+  return rows.map((r) => r.text)
+}
+
 /** 组装提示词 */
-function buildMessages(lines: string[], cfg: AiConfig): { system: string; user: string } {
+function buildMessages(
+  lines: string[],
+  cfg: AiConfig,
+  song: SongContext | undefined,
+  format: 'json' | 'lines'
+): { system: string; user: string } {
+  const target = cfg.targetLanguage || '简体中文'
+  const info = songInfoLine(song)
+
+  /**
+   * 行式是给小模型用的，提示词必须**极简**。
+   *
+   * 这一条是实测换来的：同一份长提示词（4 条要求 + JSON 示例）喂给 4B 模型，
+   * 它会原样回抄英文、只加个编号就算完成；换成下面这种两句话的写法，
+   * 它才老老实实翻译。小模型的指令跟随能力有限，要求列得越多越容易跑偏 ——
+   * 对它们来说，「说清楚要什么」比「把注意事项列全」管用。
+   */
+  if (format === 'lines') {
+    return {
+      system: `你是专业的歌词翻译，译文自然流畅，符合${target}歌词的表达习惯。`,
+      user:
+        (info ? `${info}\n` : '') +
+        `把下面这段歌词逐行翻译成${target}，格式为「序号|译文」。\n` +
+        '行数必须完全一致，只输出这些行，不要解释。\n\n' +
+        lines.map((line, i) => `${i + 1}. ${line}`).join('\n')
+    }
+  }
+
   const system = [
     '你是专业的歌词翻译。',
-    `把用户给出的每一行歌词翻译成${cfg.targetLanguage || '简体中文'}。`,
+    `把用户给出的每一行歌词翻译成${target}。`,
     '要求：',
     '1. 逐行对应，行数必须与输入完全一致，不合并、不拆分、不增删。',
     '2. 保持歌词的语感和韵律，不要逐字硬译；人名、地名、专有名词可保留原文。',
@@ -172,8 +240,11 @@ function buildMessages(lines: string[], cfg: AiConfig): { system: string; user: 
     '输出格式：{"translations": ["第一行译文", "第二行译文", ...]}'
   ].join('\n')
 
-  // 编号能让模型更稳地保持行数与顺序
-  const user = lines.map((line, i) => `${i + 1}. ${line}`).join('\n')
+  const user =
+    (info ? `${info}\n\n` : '') +
+    '请翻译下面这首歌的歌词：\n' +
+    lines.map((line, i) => `${i + 1}. ${line}`).join('\n')
+
   return { system, user }
 }
 
@@ -181,13 +252,33 @@ function buildMessages(lines: string[], cfg: AiConfig): { system: string; user: 
 async function translateChunk(
   lines: string[],
   cfg: AiConfig,
-  baseUrl: string
+  baseUrl: string,
+  song: SongContext | undefined,
+  format: 'json' | 'lines'
 ): Promise<{ translations: string[]; model: string; usage?: AiTranslationOutput['usage'] }> {
-  const { system, user } = buildMessages(lines, cfg)
+  const { system, user } = buildMessages(lines, cfg, song, format)
   const endpoint = `${baseUrl}/chat/completions`
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (cfg.apiKey.trim()) headers.Authorization = `Bearer ${cfg.apiKey.trim()}`
+
+  const payload: Record<string, unknown> = {
+    model: cfg.model,
+    temperature: cfg.temperature,
+    stream: false,
+    // 安全阀：模型一旦「不会停」，没有上限就会一直生成到把上下文撑爆
+    max_tokens: cfg.maxTokens,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ]
+  }
+  /**
+   * 关闭思考链。
+   * 这是 Ollama 的扩展字段，兼容 OpenAI 的服务会忽略它；
+   * 但对本地推理模型是必须的 —— 实测不关的话，6 行歌词能生成 1.6 万 token。
+   */
+  if (cfg.disableThinking) payload.think = false
 
   let res
   try {
@@ -195,15 +286,7 @@ async function translateChunk(
       method: 'POST',
       headers,
       timeout: cfg.timeoutMs,
-      body: {
-        model: cfg.model,
-        temperature: cfg.temperature,
-        stream: false,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user }
-        ]
-      }
+      body: payload
     })
   } catch (err) {
     // 网络层失败也翻译成人话，别把 fetch failed 直接甩给用户
@@ -226,58 +309,91 @@ async function translateChunk(
     throw new Error('AI 返回了空内容，可能是模型名不对或被内容策略拦了')
   }
 
-  const parsed = extractJson(content)
-  const translations = pickTranslations(parsed)
+  const usage = body.usage
+    ? { prompt: Number(body.usage.prompt_tokens ?? 0), completion: Number(body.usage.completion_tokens ?? 0) }
+    : undefined
+
+  // 按要求的格式解析；行数不一致一律作废 —— 错位比不翻更糟
+  const translations =
+    format === 'json'
+      ? pickTranslations(extractJson(content))
+      : parseNumberedLines(content, lines.length)
+
   if (!translations) {
-    throw new Error('AI 的输出不是预期的 JSON 格式，无法解析出译文')
+    throw new Error(
+      format === 'json'
+        ? 'AI 的输出不是预期的 JSON 格式，无法解析出译文'
+        : 'AI 的输出不是「序号|译文」格式，无法解析出译文'
+    )
   }
 
-  // 行数不一致直接作废：错位比不翻更糟
   if (translations.length !== lines.length) {
     throw new Error(
       `AI 返回的行数对不上（期望 ${lines.length} 行，得到 ${translations.length} 行），已放弃这批结果`
     )
   }
 
-  const usage = body.usage
-    ? { prompt: Number(body.usage.prompt_tokens ?? 0), completion: Number(body.usage.completion_tokens ?? 0) }
-    : undefined
-
   return { translations, model: String(body.model ?? cfg.model), usage }
 }
 
 /**
  * 翻译整首歌的歌词行（只传需要翻译的行文本，调用方负责拼回 LRC）。
+ *
+ * `auto` 模式下先按 JSON 来，解析失败**自动改用行式重试一次**：
+ * 大模型两者都行，而小模型处理 JSON 转义很吃力（实测 4B 模型 2 次挂 1 次），
+ * 行式对它们友好得多 —— 这样同一套代码既能伺候云端大模型，也能伺候本地小模型。
  */
 export async function translateLinesWithAi(
   lines: string[],
-  cfg: AiConfig
+  cfg: AiConfig,
+  song?: SongContext
 ): Promise<AiTranslationOutput> {
   const baseUrl = normalizeBaseUrl(cfg.baseUrl)
   if (!baseUrl) throw new Error('还没填接口地址')
   if (!cfg.model.trim()) throw new Error('还没填模型名')
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error('接口地址必须以 http:// 或 https:// 开头')
 
+  const order: ('json' | 'lines')[] =
+    cfg.outputFormat === 'lines' ? ['lines'] : cfg.outputFormat === 'json' ? ['json'] : ['json', 'lines']
+
   const out: string[] = []
   let model = cfg.model
   let usage: AiTranslationOutput['usage']
   let chunks = 0
+  let usedFormat: 'json' | 'lines' = order[0]
+  let lastError: Error | null = null
 
   for (let i = 0; i < lines.length; i += MAX_LINES_PER_CHUNK) {
     const slice = lines.slice(i, i + MAX_LINES_PER_CHUNK)
-    const res = await translateChunk(slice, cfg, baseUrl)
-    out.push(...res.translations)
-    model = res.model
+    let done: { translations: string[]; model: string; usage?: AiTranslationOutput['usage'] } | null = null
+
+    for (const format of order) {
+      try {
+        done = await translateChunk(slice, cfg, baseUrl, song, format)
+        usedFormat = format
+        break
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err))
+        // 网络 / 鉴权 / 额度这类错误，重试另一种格式也没意义，直接抛出去
+        if (/Key 无效|额度|限流|连不上|超时|地址或模型名/.test(e.message)) throw e
+        lastError = e
+      }
+    }
+
+    if (!done) throw lastError ?? new Error('AI 翻译失败')
+
+    out.push(...done.translations)
+    model = done.model
     chunks += 1
-    if (res.usage) {
+    if (done.usage) {
       usage = {
-        prompt: (usage?.prompt ?? 0) + res.usage.prompt,
-        completion: (usage?.completion ?? 0) + res.usage.completion
+        prompt: (usage?.prompt ?? 0) + done.usage.prompt,
+        completion: (usage?.completion ?? 0) + done.usage.completion
       }
     }
   }
 
-  return { translations: out, model, usage, chunks }
+  return { translations: out, model, usage, chunks, format: usedFormat }
 }
 
 /**
@@ -305,16 +421,22 @@ export async function testAiConnection(cfg: AiConfig): Promise<{
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (cfg.apiKey.trim()) headers.Authorization = `Bearer ${cfg.apiKey.trim()}`
 
+    const testBody: Record<string, unknown> = {
+      model: cfg.model,
+      temperature: 0,
+      stream: false,
+      // 测试连接也要设上限并关思考链：本地推理模型不关的话，
+      // 一句「ping」能让它想上几分钟，看起来就像卡死了
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'ping' }]
+    }
+    if (cfg.disableThinking) testBody.think = false
+
     const res = await httpRequest(endpoint, {
       method: 'POST',
       headers,
       timeout: Math.min(cfg.timeoutMs, 30000),
-      body: {
-        model: cfg.model,
-        temperature: 0,
-        stream: false,
-        messages: [{ role: 'user', content: 'ping' }]
-      }
+      body: testBody
     })
 
     const bodyText = typeof res.body === 'string' ? res.body : JSON.stringify(res.body ?? '')

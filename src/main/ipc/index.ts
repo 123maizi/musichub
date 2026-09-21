@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs'
 
 import type { Lyric, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
 import type { AiConfig } from '@shared/types/ai'
+import type { SavedTranslation } from '@shared/types/ai'
 import { AI_PRESETS } from '@shared/types/ai'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
@@ -37,6 +38,8 @@ export interface IpcContext {
   library: import('@main/core/storage/library').LibraryService
   /** AI 歌词翻译配置 */
   ai: import('@main/core/storage/ai-config').AiConfigStore
+  /** 已保存的译文（切歌回来、重启后都还在） */
+  savedTranslations: import('@main/core/storage/saved-translation').SavedTranslationStore
   /** 音源目录 */
   sourceDir: string
   /** 默认下载目录 */
@@ -45,7 +48,7 @@ export interface IpcContext {
 
 /** 注册全部 IPC 处理器，并把服务的推送事件转发到渲染层 */
 export function registerIpc(ctx: IpcContext): void {
-  const { sources, search, resolver, downloads, proxy, ai } = ctx
+  const { sources, search, resolver, downloads, proxy, ai, savedTranslations } = ctx
 
   /* ------------------------------ 音源 ------------------------------ */
 
@@ -107,12 +110,32 @@ export function registerIpc(ctx: IpcContext): void {
     resolver.getLyric(song, sourceIds)
   )
 
-  // 歌词翻译：源语言自动探测，失败原因如实回报，绝不把原文当译文返回
-  ipcMain.handle(CH.playTranslateLyric, async (_e, lyric: Lyric, target?: string) => {
+  /**
+   * 歌词翻译：源语言自动探测，失败原因如实回报，绝不把原文当译文返回。
+   *
+   * song 是可选的：带上它之后，歌名 / 歌手 / 专辑会一并写进给 AI 的提示词 ——
+   * 模型知道自己在翻哪首歌，人名与专有名词会准得多。
+   */
+  ipcMain.handle(
+    CH.playTranslateLyric,
+    async (_e, lyric: Lyric, target?: string, song?: Song) => {
     const main = lyric?.lyric || lyric?.lxlyric || ''
+    /** 翻成功就顺手存下来：切歌回来还在、重启也在 */
+    const remember = (tlyric: string, provider: SavedTranslation['provider'], model?: string): void => {
+      if (!song?.id) return
+      savedTranslations.save({
+        songId: song.id,
+        tlyric,
+        provider,
+        providerName: model,
+        edited: false,
+        updatedAt: Date.now()
+      })
+    }
 
     // 平台已带官方翻译 → 直接用，不必再翻
     if (lyric?.tlyric && lyric.tlyric.trim()) {
+      remember(lyric.tlyric, 'official')
       return {
         lyric,
         translated: true,
@@ -149,8 +172,14 @@ export function registerIpc(ctx: IpcContext): void {
      */
     if (aiReady) {
       try {
-        const aiResult = await translateLrcWithAi(main, cfg)
+        // 把歌名 / 歌手 / 专辑一并交给模型：知道在翻哪首歌，译文会准得多
+        const aiResult = await translateLrcWithAi(main, cfg, {
+          name: song?.name,
+          singer: song?.singer,
+          album: song?.albumName
+        })
         if (aiResult.result.translated) {
+          remember(aiResult.result.lrc, 'ai', aiResult.model)
           return {
             lyric: {
               ...lyric,
@@ -194,6 +223,7 @@ export function registerIpc(ctx: IpcContext): void {
           }
         }
         const fallback = await translateLrcDetailed(main, target)
+        if (fallback.translated) remember(fallback.lrc, 'public')
         return {
           lyric: fallback.translated
             ? {
@@ -228,6 +258,7 @@ export function registerIpc(ctx: IpcContext): void {
       }
     }
 
+    remember(result.lrc, 'public')
     return {
       lyric: { ...lyric, tlyric: result.lrc, sourceId: `${lyric?.sourceId ?? 'builtin'}+translated` },
       translated: true,
@@ -250,6 +281,18 @@ export function registerIpc(ctx: IpcContext): void {
 
   // 测试连接：顺带把服务端的模型列表带回来，界面可以直接给用户选
   ipcMain.handle(CH.aiTest, () => testAiConnection(ai.get()))
+
+  /* ------------------------------ 译文存取 ------------------------------ */
+
+  ipcMain.handle(CH.lyricSavedGet, (_e, songId: string) => savedTranslations.get(songId))
+
+  ipcMain.handle(CH.lyricSavedSet, (_e, entry: SavedTranslation) =>
+    savedTranslations.save({ ...entry, updatedAt: Date.now() })
+  )
+
+  ipcMain.handle(CH.lyricSavedDelete, (_e, songId: string) => {
+    savedTranslations.remove(songId)
+  })
 
   // 渲染层发现音源给了试听片段时会调这里：冷却该源 + 清掉这首歌的缓存
   ipcMain.handle(

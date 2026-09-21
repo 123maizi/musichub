@@ -22,6 +22,14 @@ export interface AiPreset {
   model: string
   /** 是否不需要 API Key（本地 Ollama） */
   noKey?: boolean
+  /**
+   * 是否默认关闭「思考链」。
+   *
+   * 本地推理模型（qwen3 这类）默认会先写一大段思维链再回答 ——
+   * 实测把 6 行歌词硬生生生成成 16000 多 token，上下文直接撑爆。
+   * 本地预设默认关掉它。
+   */
+  disableThinking?: boolean
   hint?: string
 }
 
@@ -78,7 +86,8 @@ export const AI_PRESETS: AiPreset[] = [
     baseUrl: 'http://127.0.0.1:11434/v1',
     model: 'qwen2.5:7b',
     noKey: true,
-    hint: '完全离线，不花钱，速度取决于本机'
+    disableThinking: true,
+    hint: '完全离线，不花钱；填本地已导入的模型名即可'
   },
   {
     id: 'custom',
@@ -111,6 +120,25 @@ export interface AiConfig {
   fallbackToPublic: boolean
   /** 自定义提示词里的目标语言描述，默认「简体中文」 */
   targetLanguage: string
+  /**
+   * 关闭思考链。
+   * 本地推理模型必开 —— 否则它会先写几千 token 的思维链，慢且容易撑爆上下文。
+   */
+  disableThinking: boolean
+  /**
+   * 单次回复的 token 上限。
+   * 这是安全阀：模型一旦「不会停」，没有上限就会一直生成到把上下文撑爆
+   * （实测跑满 4 分 43 秒后报错）。歌词翻译几百 token 足够。
+   */
+  maxTokens: number
+  /**
+   * 要求模型输出的格式：
+   *  · auto —— 先按 JSON 来，失败自动改用行式重试一次（推荐）
+   *  · json —— 只走 JSON
+   *  · lines —— 只走「序号|译文」行式
+   * 小模型处理 JSON 转义很吃力（实测 2 次挂 1 次），行式对它们友好得多。
+   */
+  outputFormat: 'auto' | 'json' | 'lines'
 }
 
 /** 默认配置 */
@@ -123,7 +151,29 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   temperature: 0.3,
   timeoutMs: 60000,
   fallbackToPublic: true,
-  targetLanguage: '简体中文'
+  targetLanguage: '简体中文',
+  disableThinking: false,
+  maxTokens: 1500,
+  outputFormat: 'auto'
+}
+
+/**
+ * 保存下来的翻译。
+ *
+ * 用户翻过一次就该一直留着 —— 切歌回来、重启应用都还在。
+ * 手动改过的（edited）尤其不能丢，那是用户自己敲进去的东西。
+ */
+export interface SavedTranslation {
+  songId: string
+  /** 译文 LRC */
+  tlyric: string
+  /** 来自哪里：AI / 内置接口 / 平台自带 / 手工编辑 */
+  provider: 'ai' | 'public' | 'official' | 'manual'
+  /** AI 的话记下模型名，方便回溯 */
+  providerName?: string
+  /** 是否被用户手工改过 —— 改过的绝不自动覆盖 */
+  edited: boolean
+  updatedAt: number
 }
 
 /** 连接测试结果 */

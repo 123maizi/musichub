@@ -9,9 +9,12 @@ import { computed, ref } from 'vue'
 import type { Lyric, MusicUrlResult, Quality, Song } from '@shared/types/music'
 import { cleanIpcError, findLyricIndex, parseLrcWithTranslation, type LyricLine } from '../utils/format'
 import {
+  deleteSavedTranslation,
   getLyric as fetchLyric,
   getPlayUrl,
+  getSavedTranslation,
   reportBadSource,
+  saveTranslation,
   translateLyric
 } from '../utils/ipc'
 import { useLibraryStore } from './library'
@@ -56,6 +59,18 @@ export const usePlayerStore = defineStore('player', () => {
   const translatedSongId = ref('')
   /** 是否显示译文（用户可随时关掉） */
   const showTranslation = ref(true)
+  /** 当前译文是不是用户手工改过的（改过的不会被自动翻译覆盖） */
+  const savedEdited = ref(false)
+  /** 译文来源：ai / public / official / manual */
+  const savedProvider = ref('')
+
+  /* ------------------------------ 译文编辑 ------------------------------ */
+
+  /** 编辑器是否打开 */
+  const editing = ref(false)
+  /** 编辑中的行：时间戳 + 原文 + 译文输入 */
+  const editLines = ref<{ time: number; text: string; trans: string }[]>([])
+  const savingEdit = ref(false)
 
   let audio: HTMLAudioElement | null = null
 
@@ -218,6 +233,19 @@ export const usePlayerStore = defineStore('player', () => {
       const played = el.currentTime
 
       /**
+       * 用户明确按过暂停，就绝不允许任何「自动」行为。
+       *
+       * 这是「暂停后切后台自己又响起来」的根因：单曲循环模式下
+       * handleEnded 会 seek(0) + resume()，而 resume() 会把 userPaused
+       * 清掉并真的开始播放。只要 ended 在暂停期间冒出来（流被掐断、
+       * 后台恢复时的陈旧事件都可能触发），用户就会看到「明明暂停了却自己开播」。
+       */
+      if (userPaused.value) {
+        playing.value = false
+        return
+      }
+
+      /**
        * 刚拖过进度条就判「播完了」是不可信的。
        * 拖动落点若靠近结尾，浏览器会立刻发 ended —— 此时用户显然不是
        * 想切歌，只是把光标放到了尾巴上。这种情况只停下，不自动跳。
@@ -247,6 +275,22 @@ export const usePlayerStore = defineStore('player', () => {
         if (Number.isFinite(total) && total >= 15 && played < total - 3) {
           void verifyDuration()
         }
+        return
+      }
+
+      /**
+       * 最后一道闸：这首歌**本该更长**，却在这里就播完了 —— 说明拿到的是残缺流。
+       *
+       * 从播放器的角度看这次确实播到了结尾，所以上面的判断会放行；
+       * 但歌曲元数据说它还有几分钟。这种「听着听着突然切歌」正是这么来的：
+       * 音源给了一段短流，播完就跳到下一首，用户完全莫名其妙。
+       * 这里宁可停下来报错并换源，也不替用户做切歌的决定。
+       */
+      const expected = current.value?.duration ?? 0
+      if (expected > 60 && total < expected * 0.75) {
+        playing.value = false
+        error.value = `这版音源只有 ${Math.round(total)} 秒（原曲约 ${Math.round(expected)} 秒），已停在原处，没有自动切歌`
+        void verifyDuration()
         return
       }
 
@@ -292,9 +336,24 @@ export const usePlayerStore = defineStore('player', () => {
     translated.value = false
     translateError.value = ''
     translatedSongId.value = ''
+    savedEdited.value = false
+    savedProvider.value = ''
+    // 切歌时把编辑器关掉，免得把上一首的编辑内容留在界面上
+    editing.value = false
+    editLines.value = []
     currentTime.value = 0
     // 换歌了，上一首的「刚拖过进度条」状态不能带过来
     lastSeekAt = 0
+    /**
+     * 换歌必须重置「已上报坏源」与「连续换源次数」。
+     *
+     * markedSourceId 以前是不重置的：第一首歌把某个音源标记为坏之后，
+     * 后面每首歌都会因为这个「已经标过」的判断而跳过试听片段检测 ——
+     * 于是残缺流一路播到底，播完就自动切歌。这正是「听着听着突然换歌」
+     * 最可能的来源。
+     */
+    markedSourceId.value = ''
+    fragmentAttempts.value = 0
     // 重置音频上报的时长，真实值会在加载与播放过程中补上
     mediaDuration.value = 0
 
@@ -334,6 +393,26 @@ export const usePlayerStore = defineStore('player', () => {
       translated.value = lyricLines.value.some((line) => !!line.trans)
       translateError.value = ''
       translatedSongId.value = translated.value ? song.id : ''
+      savedEdited.value = false
+      savedProvider.value = lyric.tlyric?.trim() ? 'official' : ''
+
+      /**
+       * 平台没给翻译时，看看之前有没有翻过这首。
+       *
+       * 这就是「翻完切歌回来就没了」的修法：译文存在主进程里（按歌曲 id），
+       * 这里取回来直接套用 —— 不管隔了多少首歌、哪怕重启过应用，
+       * 回来还是那份译文。手工改过的更是要原样拿回来。
+       */
+      if (!translated.value) {
+        const saved = await getSavedTranslation(song.id)
+        if (saved && current.value?.id === song.id && saved.tlyric.trim()) {
+          lyricLines.value = parseLrcWithTranslation(main, saved.tlyric)
+          translated.value = lyricLines.value.some((line) => !!line.trans)
+          translatedSongId.value = song.id
+          savedEdited.value = saved.edited
+          savedProvider.value = saved.provider
+        }
+      }
     } catch {
       lyricLines.value = []
       translated.value = false
@@ -361,7 +440,7 @@ export const usePlayerStore = defineStore('player', () => {
     translateError.value = ''
 
     try {
-      const result = await translateLyric(lyric, 'zh-CN')
+      const result = await translateLyric(lyric, 'zh-CN', song)
       // 期间换歌了就丢弃结果，别把上一首的译文贴到这一首上
       if (current.value?.id !== song.id) return false
 
@@ -378,6 +457,9 @@ export const usePlayerStore = defineStore('player', () => {
       showTranslation.value = true
       // 部分行没翻出来时也如实说明，不假装全翻好了
       translateError.value = result.error ?? ''
+      // 结果已由主进程按歌曲 id 存好，这里同步一下状态即可
+      savedEdited.value = false
+      savedProvider.value = result.provider ?? 'ai'
       return true
     } catch (err) {
       translateError.value = cleanIpcError(err)
@@ -475,6 +557,107 @@ export const usePlayerStore = defineStore('player', () => {
     if (audio) audio.volume = clamped
   }
 
+  /* ------------------------------ 译文的编辑与保存 ------------------------------ */
+
+  /**
+   * 打开译文编辑器。
+   *
+   * 支持两种用法：
+   *   · 已经有译文 → 改它（「修改歌词翻译」）
+   *   · 还没有译文 → 从空白开始填（「添加歌词翻译」）
+   * 两者其实是同一个界面，只是初值不同，没必要做两套。
+   */
+  function openEditor(): void {
+    const song = current.value
+    if (!song) return
+    editLines.value = lyricLines.value
+      .filter((line) => !!line.text)
+      .map((line) => ({ time: line.time, text: line.text, trans: line.trans ?? '' }))
+    editing.value = true
+  }
+
+  function closeEditor(): void {
+    editing.value = false
+    editLines.value = []
+  }
+
+  /** 秒 → LRC 时间戳 [mm:ss.xx] */
+  function toLrcTime(seconds: number): string {
+    const safe = Math.max(0, seconds)
+    const min = Math.floor(safe / 60)
+    const sec = Math.floor(safe % 60)
+    const centi = Math.round((safe - Math.floor(safe)) * 100)
+    return `[${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(centi).padStart(2, '0')}]`
+  }
+
+  /**
+   * 保存编辑好的译文。
+   *
+   * 必须带时间戳 —— 译文行是**按时间戳**贴回原文的（见 format.ts 的
+   * mergeTranslation），只存纯文字的话贴不回去，保存了也看不见效果。
+   * 时间戳直接取原文行的，所以对得上是精确匹配。
+   *
+   * 只写填了译文的行：空着表示「这行不翻」，用户既能逐行补，也能只改几句。
+   */
+  async function saveEditor(): Promise<boolean> {
+    const song = current.value
+    if (!song) return false
+
+    savingEdit.value = true
+    try {
+      const filled = editLines.value.filter((line) => line.trans.trim())
+      const tlyric = filled.map((line) => `${toLrcTime(line.time)}${line.trans.trim()}`).join('\n')
+
+      const main = lyricRaw.value?.lyric || lyricRaw.value?.lxlyric || ''
+
+      if (!tlyric.trim()) {
+        // 全空 = 不要译文了
+        await deleteSavedTranslation(song.id)
+        lyricLines.value = parseLrcWithTranslation(main)
+        translated.value = false
+        savedEdited.value = false
+        savedProvider.value = ''
+        closeEditor()
+        return true
+      }
+
+      await saveTranslation({
+        songId: song.id,
+        tlyric,
+        provider: 'manual',
+        edited: true,
+        updatedAt: Date.now()
+      })
+
+      lyricLines.value = parseLrcWithTranslation(main, tlyric)
+      translated.value = lyricLines.value.some((line) => !!line.trans)
+      translatedSongId.value = song.id
+      savedEdited.value = true
+      savedProvider.value = 'manual'
+      showTranslation.value = true
+      closeEditor()
+      return true
+    } catch (err) {
+      translateError.value = cleanIpcError(err)
+      return false
+    } finally {
+      savingEdit.value = false
+    }
+  }
+
+  /** 删掉译文，等于「重新翻一遍」 */
+  async function clearTranslation(): Promise<void> {
+    const song = current.value
+    if (!song) return
+    await deleteSavedTranslation(song.id)
+    const main = lyricRaw.value?.lyric || lyricRaw.value?.lxlyric || ''
+    lyricLines.value = parseLrcWithTranslation(main, lyricRaw.value?.tlyric)
+    translated.value = lyricLines.value.some((line) => !!line.trans)
+    translatedSongId.value = translated.value ? song.id : ''
+    savedEdited.value = false
+    savedProvider.value = translated.value ? 'official' : ''
+  }
+
   /* ------------------------------ 上下一首 ------------------------------ */
 
   function nextIndex(): number {
@@ -516,6 +699,10 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function handleEnded(): Promise<void> {
+    // 用户按过暂停就什么都不做 —— resume() 会清掉暂停闸门，
+    // 是这个「暂停后自己又播起来」的最后一道口子
+    if (userPaused.value) return
+
     if (mode.value === 'single') {
       seek(0)
       resume()
@@ -607,6 +794,11 @@ export const usePlayerStore = defineStore('player', () => {
     translated,
     translateError,
     showTranslation,
+    savedEdited,
+    savedProvider,
+    editing,
+    editLines,
+    savingEdit,
     // 派生
     progress,
     currentLyricIndex,
@@ -628,6 +820,10 @@ export const usePlayerStore = defineStore('player', () => {
     removeFromQueue,
     clearQueue,
     loadLyric,
-    translateCurrentLyric
+    translateCurrentLyric,
+    openEditor,
+    closeEditor,
+    saveEditor,
+    clearTranslation
   }
 })

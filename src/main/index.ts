@@ -24,7 +24,9 @@ import { DownloadManager } from './core/download/manager'
 import { JsonStore } from './core/storage/store'
 import { LibraryService } from './core/storage/library'
 import { AiConfigStore, type StoredAiConfig } from './core/storage/ai-config'
+import { SavedTranslationStore } from './core/storage/saved-translation'
 import { DEFAULT_AI_CONFIG } from '@shared/types/ai'
+import type { SavedTranslation } from '@shared/types/ai'
 import { registerIpc } from './ipc'
 import { createWindow } from './window'
 
@@ -144,6 +146,17 @@ async function bootstrap(): Promise<void> {
     } as unknown as StoredAiConfig)
   )
 
+  /**
+   * 已保存的译文。
+   * 单独一层：切歌回来、重启应用都还在；用户手工改过的也不会被自动翻译覆盖。
+   */
+  const savedTranslations = new SavedTranslationStore(
+    new JsonStore<{ items: Record<string, SavedTranslation> }>(
+      join(userData, 'lyric-saved.json'),
+      { items: {} }
+    )
+  )
+
   /* --------------------------- 3. 核心服务 --------------------------- */
   const sourceDir = join(userData, APP_CONST.sourceDirName)
   /**
@@ -192,6 +205,7 @@ async function bootstrap(): Promise<void> {
     library,
     proxy,
     ai: aiStore,
+    savedTranslations,
     sourceDir,
     downloadDir: configStore.get().dir
   })

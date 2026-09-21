@@ -248,6 +248,75 @@ async function runAiTest(): Promise<void> {
         </div>
 
         <div class="field">
+          <label>思考链</label>
+          <div class="control col gap-4">
+            <label class="check">
+              <input
+                type="checkbox"
+                :checked="aiCfg?.disableThinking ?? false"
+                @change="updateAi({ disableThinking: ($event.target as HTMLInputElement).checked })"
+              />
+              <span>关闭思考链（本地推理模型建议勾上）</span>
+            </label>
+            <span class="faint note">
+              本地模型（qwen3 这类）默认会先写一大段思维链再回答 —— 实测 6 行歌词能生成
+              1.6 万 token，把上下文撑爆、几分钟才返回。勾上之后 1 秒出结果。
+            </span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>输出格式</label>
+          <div class="control col gap-4">
+            <select
+              :value="aiCfg?.outputFormat ?? 'auto'"
+              @change="updateAi({ outputFormat: ($event.target as HTMLSelectElement).value as never })"
+            >
+              <option value="auto">自动（先试 JSON，失败改行式重试）</option>
+              <option value="json">只用 JSON</option>
+              <option value="lines">只用「序号|译文」行式</option>
+            </select>
+            <span class="faint note">
+              小模型处理 JSON 转义很吃力（实测 4B 模型 2 次挂 1 次），行式对它们稳得多。
+              选「自动」就不用操心，两种都会替你试。
+            </span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>回复上限</label>
+          <div class="control row gap-8">
+            <input
+              type="number"
+              min="200"
+              max="8000"
+              step="100"
+              class="num-input"
+              :value="aiCfg?.maxTokens ?? 1500"
+              @change="updateAi({ maxTokens: Math.max(200, Number(($event.target as HTMLInputElement).value)) })"
+            />
+            <span class="faint">token</span>
+          </div>
+          <span class="faint note">安全阀：模型一旦「不会停」，没上限就会一直生成到报错。</span>
+        </div>
+
+        <div class="field">
+          <label>温度</label>
+          <div class="control row gap-8">
+            <input
+              type="number"
+              min="0"
+              max="2"
+              step="0.1"
+              class="num-input"
+              :value="aiCfg?.temperature ?? 0.3"
+              @change="updateAi({ temperature: Math.max(0, Math.min(2, Number(($event.target as HTMLInputElement).value))) })"
+            />
+            <span class="faint">越低越稳，翻译建议 0 ~ 0.3</span>
+          </div>
+        </div>
+
+        <div class="field">
           <label>目标语言</label>
           <div class="control col gap-4">
             <input

@@ -13,7 +13,7 @@ import type {
 } from './music'
 import type { DownloadAddRequest, DownloadConfig, DownloadTask } from './download'
 import type { SourceImportResult, SourceInfo } from './source'
-import type { AiConfig, AiTestResult } from './ai'
+import type { AiConfig, AiTestResult, SavedTranslation } from './ai'
 
 export interface AppInfo {
   name: string
@@ -111,6 +111,12 @@ export interface AiApi {
   setConfig(patch: Partial<AiConfig>): Promise<AiConfig>
   /** 测试连通性；顺带返回服务端可用模型列表 */
   test(): Promise<AiTestResult>
+  /** 读某首歌已保存的译文（切歌回来、重启后都还在） */
+  getSaved(songId: string): Promise<SavedTranslation | null>
+  /** 保存译文；edited=true 表示用户手工改过，之后不再被自动翻译覆盖 */
+  saveTranslation(entry: SavedTranslation): Promise<SavedTranslation>
+  /** 删除译文（想重新翻一遍时用） */
+  deleteSaved(songId: string): Promise<void>
 }
 
 /** 主进程推送事件（renderer 监听） */

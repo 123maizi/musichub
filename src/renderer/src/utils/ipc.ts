@@ -12,7 +12,7 @@
  */
 import type { Lyric, LyricTranslateResult, MusicUrlRequest, MusicUrlResult, Song } from '@shared/types/music'
 import type { DownloadAddRequest, DownloadTask } from '@shared/types/download'
-import type { AiConfig, AiTestResult } from '@shared/types/ai'
+import type { AiConfig, AiTestResult, SavedTranslation } from '@shared/types/ai'
 
 /**
  * 解包成可结构化克隆的纯数据。
@@ -43,9 +43,18 @@ export function getLyric(song: Song, sourceIds?: string[]): Promise<Lyric | null
  * 翻译歌词。
  * lyric 里可能挂着从主进程传来的 Proxy 包装，必须先拆成纯对象再过 IPC，
  * 否则会报 "An object could not be cloned"。
+ * song 一并传过去，让 AI 知道自己在翻哪首歌。
  */
-export function translateLyric(lyric: Lyric, target?: string): Promise<LyricTranslateResult> {
-  return window.api.player.translateLyric(toPlain(lyric), target)
+export function translateLyric(
+  lyric: Lyric,
+  target?: string,
+  song?: Song
+): Promise<LyricTranslateResult> {
+  return window.api.player.translateLyric(
+    toPlain(lyric),
+    target,
+    song ? toPlain(song) : undefined
+  )
 }
 
 /** 加入下载队列（songs 通常直接来自响应式列表） */
@@ -85,4 +94,21 @@ export function setAiConfig(patch: Partial<AiConfig>): Promise<AiConfig> {
 /** 测试 AI 连接；顺带拿回服务端可用模型列表 */
 export function testAi(): Promise<AiTestResult> {
   return window.api.ai.test()
+}
+
+/* ------------------------------ 译文存取 ------------------------------ */
+
+/** 读已保存的译文（切歌回来、重启后都还在） */
+export function getSavedTranslation(songId: string): Promise<SavedTranslation | null> {
+  return window.api.ai.getSaved(songId)
+}
+
+/** 保存译文；手工编辑时 edited 传 true */
+export function saveTranslation(entry: SavedTranslation): Promise<SavedTranslation> {
+  return window.api.ai.saveTranslation(toPlain(entry))
+}
+
+/** 删除译文，相当于「重新翻一遍」 */
+export function deleteSavedTranslation(songId: string): Promise<void> {
+  return window.api.ai.deleteSaved(songId)
 }

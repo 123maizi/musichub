@@ -70,10 +70,30 @@ const translateTitle = computed(() =>
   player.translated ? '点击切换译文显示' : '把外语歌词翻成中文'
 )
 
+/** 译文来源，显示给用户看（AI 的话带上模型名） */
+const providerLabel = computed(() => {
+  if (player.savedEdited) return '手工修改'
+  const src = player.savedProvider
+  if (src === 'manual') return '手工填写'
+  if (src === 'official') return '平台'
+  if (src === 'public') return '内置翻译'
+  return 'AI'
+})
+
 /** 已经翻过就不重复请求（翻译接口有配额），只切换显示 */
 async function onTranslate(): Promise<void> {
   const ok = await player.translateCurrentLyric()
   if (!ok && player.translateError) toast.value = player.translateError
+}
+
+async function onSaveEditor(): Promise<void> {
+  const ok = await player.saveEditor()
+  toast.value = ok ? '译文已保存，之后切歌回来都还在' : player.translateError || '保存失败'
+}
+
+async function onClearTranslation(): Promise<void> {
+  await player.clearTranslation()
+  toast.value = '已清除译文，可以重新翻译'
 }
 
 /* ------------------------------ 歌手 / 专辑跳转 ------------------------------ */
@@ -365,9 +385,56 @@ function queueCurrent(): void {
             <AppIcon name="translate" :size="14" />
             <span>{{ translateLabel }}</span>
           </button>
+
+          <!-- 译文不准时自己改：同一个入口既管「修改」也管「添加」 -->
+          <button
+            class="translate-btn"
+            :title="player.translated ? '逐行修改译文' : '手工添加译文'"
+            @click="player.openEditor()"
+          >
+            <AppIcon name="edit" :size="13" />
+            <span>{{ player.translated ? '修改译文' : '添加译文' }}</span>
+          </button>
+
+          <button
+            v-if="player.translated"
+            class="translate-btn"
+            title="删掉译文，下次点翻译会重新翻一遍"
+            @click="onClearTranslation"
+          >
+            <AppIcon name="close" :size="12" />
+            <span>清除</span>
+          </button>
+
+          <span v-if="player.savedEdited" class="translate-note">已手工修改</span>
+          <span v-else-if="providerLabel" class="translate-note">由 {{ providerLabel }} 翻译</span>
           <span v-if="player.translateError" class="translate-note ellipsis">
             {{ player.translateError }}
           </span>
+        </div>
+
+        <!-- 译文编辑器：改准了再存，存了就一直在 -->
+        <div v-if="player.editing" class="editor">
+          <div class="editor-head">
+            <span class="editor-title">逐行编辑译文</span>
+            <span class="faint small-text">留空表示这行不翻；保存后会一直保留</span>
+          </div>
+          <div class="editor-body">
+            <div v-for="(line, index) in player.editLines" :key="index" class="editor-row">
+              <div class="editor-src ellipsis">{{ line.text }}</div>
+              <input
+                v-model="line.trans"
+                class="editor-input"
+                :placeholder="`第 ${index + 1} 行的译文`"
+              />
+            </div>
+          </div>
+          <div class="editor-foot">
+            <button class="primary small" :disabled="player.savingEdit" @click="onSaveEditor">
+              {{ player.savingEdit ? '保存中…' : '保存译文' }}
+            </button>
+            <button class="ghost small" @click="player.closeEditor()">取消</button>
+          </div>
         </div>
 
         <div v-if="!hasLyric" class="lyric-empty">
@@ -847,6 +914,67 @@ function queueCurrent(): void {
 /* 译文：比原文小一档、浅一档，读到主句时译文不抢戏 */
 .lyric-main {
   display: block;
+}
+
+/* ------------------------------ 译文编辑器 ------------------------------ */
+
+.editor {
+  flex: none;
+  margin: 0 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  max-height: 46vh;
+}
+
+.editor-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.editor-title {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.editor-body {
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.editor-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.editor-src {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  min-width: 0;
+}
+
+.editor-input {
+  width: 100%;
+  font-size: 12.5px;
+  padding: 6px 9px;
+}
+
+.editor-foot {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
 }
 
 .lyric-trans {

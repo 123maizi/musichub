@@ -67,7 +67,11 @@ export const CH = {
   // AI 歌词翻译
   aiGetConfig: 'ai:getConfig',
   aiSetConfig: 'ai:setConfig',
-  aiTest: 'ai:test'
+  aiTest: 'ai:test',
+  // 译文的保存与手动编辑
+  lyricSavedGet: 'lyric:savedGet',
+  lyricSavedSet: 'lyric:savedSet',
+  lyricSavedDelete: 'lyric:savedDelete'
 } as const
 
 /** 主进程 → 渲染层 推送通道 */

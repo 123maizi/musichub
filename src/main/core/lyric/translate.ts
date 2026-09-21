@@ -24,7 +24,7 @@
 import type { AiConfig } from '@shared/types/ai'
 import type { Lyric } from '@shared/types/music'
 import { httpRequest } from '../net/http'
-import { translateLinesWithAi } from './ai-translate'
+import { translateLinesWithAi, type SongContext } from './ai-translate'
 import { getCachedTranslation, putCachedTranslation } from './translate-cache'
 
 /** MyMemory 单次查询上限（留余量，按 480 分片） */
@@ -373,6 +373,7 @@ export async function translateLrc(lrc: string, target = 'zh-CN'): Promise<strin
 export async function translateLrcWithAi(
   lrc: string,
   cfg: AiConfig,
+  song?: SongContext,
   target = 'zh-CN'
 ): Promise<{ result: TranslateResult; model: string }> {
   const lines = parseLrcLines(lrc)
@@ -425,7 +426,7 @@ export async function translateLrcWithAi(
     }
   }
 
-  const output = await translateLinesWithAi(texts, cfg)
+  const output = await translateLinesWithAi(texts, cfg, song)
 
   // 与公共接口同样的判定：以「内容是否真的变了」为准，不拿调用成功冒充翻译成功
   const merged = [...lines]
