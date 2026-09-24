@@ -280,6 +280,34 @@ const kuwoProvider: SearchProvider = {
  * 酷狗音乐
  * ------------------------------------------------------------------ */
 
+/**
+ * 酷狗封面地址。
+ *
+ * 之前这里直接写死 undefined，理由是「stdmusic 那套地址对任何专辑都返回
+ * 同一张占位图」。那个结论其实是因为**取错了字段**：
+ * 封面根本不在 album_id 里，而是藏在 trans_param 这个 JSON 字符串的
+ * union_cover 字段里 —— 形如
+ *   http://imge.kugou.com/stdmusic/{size}/20230920/20230920142503632013.jpg
+ * 注意那个 {size} 占位符，得替换成具体尺寸才是一个完整地址
+ * （实测 150/240/300/480/800/1000 都认）。
+ *
+ * 换上正确字段后，实测四个关键词各 6/6 全部拿到封面，
+ * 且每首歌的地址都不同 —— 是真封面，不是统一占位图。
+ */
+function kugouCoverUrl(item: Json, size = 240): string | undefined {
+  const raw = item.trans_param
+  if (!raw) return undefined
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    const cover = asObj(parsed).union_cover
+    if (typeof cover !== 'string' || !cover) return undefined
+    return cover.replace('{size}', String(size))
+  } catch {
+    // trans_param 偶有截断或非 JSON 的情况，拿不到就不给封面
+    return undefined
+  }
+}
+
 const kugouProvider: SearchProvider = {
   id: 'kg',
   name: '酷狗音乐',
@@ -310,9 +338,7 @@ const kugouProvider: SearchProvider = {
         albumName: str(item.album_name),
         albumId,
         duration: num(item.duration),
-        // 酷狗那套 stdmusic 地址对任何专辑都返回同一张占位图（实测 5 首全是 17853 字节），
-        // 与其给用户看假图，不如留空，交给封面补全服务去别处找真实的
-        picUrl: undefined,
+        picUrl: kugouCoverUrl(item),
         raw: {
           hash,
           sqhash: str(item.sqhash),
@@ -344,9 +370,19 @@ const qqProvider: SearchProvider = {
   platform: 'tx',
   enabled: true,
   async search(keyword, page, limit) {
+    /**
+     * 用的是 search_for_qq_cp，**不是** client_search_cp。
+     *
+     * 老路径 `client_search_cp` 现在一律返回 HTTP 500（连同 new_json/Referer
+     * 的各种组合都试过），这也是 QQ 结果突然全没了的原因。
+     * 换到 search_for_qq_cp 后恢复正常，而且**必须去掉 new_json=1** ——
+     * 带 new_json 时它只给新格式字段、专辑信息是空的；
+     * 不带才返回旧的完整字段：albumname / albummid / pubtime，
+     * 封面和年份都靠它们。
+     */
     const url =
-      `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=${page}&n=${limit}` +
-      `&w=${encodeURIComponent(keyword)}&format=json&cr=1&new_json=1&aggr=1`
+      `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?p=${page}&n=${limit}` +
+      `&w=${encodeURIComponent(keyword)}&format=json&cr=1`
 
     const res = await httpRequest(url, {
       method: 'GET',
@@ -369,15 +405,19 @@ const qqProvider: SearchProvider = {
         .filter(Boolean)
         .join('/')
       const album = asObj(item.album)
-      const albumMid = str(album.mid)
+      // 新老两种字段名都兜住：老接口给 albummid，新接口给 album.mid
+      const albumMid = str(album.mid) || str(item.albummid)
+      const albumName = str(album.name) || str(item.albumname)
       const songmid = str(item.mid) || str(item.songmid)
+      // pubtime 是秒级时间戳，转成年份写进标签
+      const pubtime = num(item.pubtime)
 
       return makeSong('tx', {
         songmid,
         songId: num(item.id) || undefined,
         name: str(item.title) || str(item.songname),
         singer: singers,
-        albumName: str(album.name) || str(item.albumname),
+        albumName,
         albumId: albumMid,
         duration: num(item.interval),
         picUrl: albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : undefined,
@@ -385,6 +425,10 @@ const qqProvider: SearchProvider = {
           songmid,
           songId: num(item.id),
           albumMid,
+          albumname: albumName,
+          pubtime: pubtime > 0 ? pubtime : undefined,
+          size320: num(item.size320),
+          sizeflac: num(item.sizeflac),
           media_mid: str(item.file?.media_mid),
           strMediaMid: str(item.file?.media_mid),
           type: num(item.type),

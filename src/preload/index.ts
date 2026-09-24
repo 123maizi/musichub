@@ -88,7 +88,9 @@ const api = {
     reportBadSource: (sourceId: string, song: Song, reason?: string) =>
       invoke(CH.playReportBadSource, sourceId, song, reason),
     /** 封面补全：平台没给封面时，按「歌名 + 歌手」去别处找一张 */
-    resolveCover: (song: Song) => invoke(CH.coverResolve, song)
+    resolveCover: (song: Song) => invoke(CH.coverResolve, song),
+    /** 把封面图片存到本地（默认存进下载目录，文件名与歌曲一致） */
+    downloadCover: (song: Song, dir?: string) => invoke(CH.coverDownload, song, dir)
   },
 
   /* ------------------------------ AI 翻译 ------------------------------ */

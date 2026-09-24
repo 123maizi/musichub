@@ -19,7 +19,7 @@ import type { MusicResolver } from '@main/core/source/resolver'
 import type { DownloadManager } from '@main/core/download/manager'
 import type { StreamProxy } from '@main/core/proxy/stream-proxy'
 import { probeUrl } from '@main/core/net/http'
-import { resolveCover } from '@main/core/cover'
+import { downloadCoverTo, resolveCover } from '@main/core/cover'
 import { detectSourceLang, translateLrcDetailed, translateLrcWithAi } from '@main/core/lyric/translate'
 import { testAiConnection } from '@main/core/lyric/ai-translate'
 
@@ -331,6 +331,27 @@ export function registerIpc(ctx: IpcContext): void {
 
   // 封面补全：平台没给封面时，按「歌名 + 歌手」去封面质量更稳的平台找一张
   ipcMain.handle(CH.coverResolve, (_e, song: Song) => resolveCover(song))
+
+  /**
+   * 把封面存到本地。
+   *
+   * 默认存进下载目录，文件名沿用下载模板（把 {quality} 换成「封面」），
+   * 这样封面文件与音频文件在同一处、名字也对得上。
+   */
+  ipcMain.handle(CH.coverDownload, async (_e, song: Song, dir?: string) => {
+    const config = downloads.getConfig()
+    const targetDir = dir?.trim() || config.dir
+    const template = config.nameTemplate || '{singer} - {name}'
+    const baseName = template
+      .replace(/\{name\}/gi, song.name ?? '')
+      .replace(/\{singer\}/gi, song.singer ?? '')
+      .replace(/\{album\}/gi, song.albumName ?? '')
+      .replace(/\{quality\}/gi, '封面')
+      .replace(/\{platform\}/gi, song.platform ?? '')
+      .trim()
+
+    return downloadCoverTo(song, targetDir, baseName || song.name || 'cover')
+  })
 
   /* ------------------------------ 下载 ------------------------------ */
 

@@ -439,14 +439,25 @@ export async function translateLrcWithAi(
     merged[lineIndex] = { ...lines[lineIndex], text: translated }
   })
 
-  if (changedCount === 0) {
+  /**
+   * 大部分行都只是原文照抄时，也算失败。
+   *
+   * 只翻了两三行、其余全抄，会一路显示成「翻译成功」，
+   * 而界面上只看得见那两行译文 —— 用户的感受就是「翻完了却不显示」。
+   * 这里如实报出来，让上层去回退或提示，别让它冒充成功。
+   */
+  const echoShare = changedCount / Math.max(1, texts.length)
+  if (echoShare < 0.5) {
     return {
       result: {
         lrc,
         translated: false,
-        successCount: 0,
+        successCount: changedCount,
         totalCount: texts.length,
-        error: 'AI 返回的译文与原文一致，未产生翻译'
+        error:
+          changedCount === 0
+            ? 'AI 返回的译文与原文一致，未产生翻译'
+            : `AI 只翻译了 ${changedCount}/${texts.length} 行，其余照抄了原文，已放弃这次结果`
       },
       model: output.model
     }

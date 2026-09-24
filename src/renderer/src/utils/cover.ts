@@ -11,8 +11,18 @@
 import type { Song } from '@shared/types/music'
 import { resolveCover } from './ipc'
 
-/** 同时最多几个补图请求 */
-const MAX_CONCURRENT = 3
+/**
+ * 同时最多几个补图请求。
+ *
+ * 原来是 3，实测不够用：一页 110 条里有三四十条缺封面
+ * （酷我的搜索结果常常没有专辑信息，只能跨平台补），
+ * 3 并发要排很久，用户看到的就是「大片大片的占位图标」。
+ * 提到 8 之后列表能在几秒内补齐。
+ *
+ * 也不能无限提 —— 补图走的是别人的搜索接口，
+ * 并发太高等于拿它当自家 CDN 用，而且容易被限流。
+ */
+const MAX_CONCURRENT = 8
 
 let running = 0
 const waiting: Array<() => void> = []
@@ -70,15 +80,21 @@ export function coverCacheSize(): number {
 /**
  * 把列表用的小图地址，换成大图地址。
  *
- * 酷我的封面地址形如 `.../star/albumcover/120/xx/yy/123.jpg`，
- * 开头那个 `120` 就是尺寸（实测 120/300/500/1000 都认，分别约
- * 2.6KB / 14KB / 52KB / 263KB）。列表里用 120 省流量，
- * 到了正在播放页那种大图上再要 500，不然就是拿 120px 硬撑 320px。
+ * 各平台的封面地址里都带一个尺寸段，列表用小图省流量，
+ * 到了正在播放页那种大图上再要大的：
+ *   · 酷我 `.../star/albumcover/120/xx/yy/123.jpg` → 500（实测 2.6KB → 52KB）
+ *   · 酷狗 `imge.kugou.com/stdmusic/240/日期/xxx.jpg` → 800（实测 29KB → 188KB）
  *
- * 注意：它换的只是尺寸，换不出内容 —— 有些专辑酷我压根没给真封面
- * （它用一张「红底＋中间一张小图」的占位图顶上），这种只能靠别家补图。
+ * 注意：换的只是尺寸，换不出内容 —— 有些专辑平台压根没给真封面，
+ * 那种只能靠别家补图（见 CoverImage 的 preferResolved）。
  */
 export function bigCoverUrl(url?: string): string | undefined {
   if (!url) return url
-  return url.replace(/(\/star\/albumcover\/)\d+(\/)/, '$1500$2')
+  if (url.includes('/star/albumcover/')) {
+    return url.replace(/(\/star\/albumcover\/)\d+(\/)/, '$1500$2')
+  }
+  if (url.includes('imge.kugou.com/stdmusic/')) {
+    return url.replace(/(imge\.kugou\.com\/stdmusic\/)\d+(\/)/, '$1800$2')
+  }
+  return url
 }

@@ -457,6 +457,23 @@ export const usePlayerStore = defineStore('player', () => {
       lyricRaw.value = result.lyric
       const main = result.lyric.lyric || result.lyric.lxlyric || ''
       lyricLines.value = parseLrcWithTranslation(main, result.lyric.tlyric)
+
+      /**
+       * 最后一道保险：一句译文都没贴上，就不算翻译成功。
+       *
+       * 主进程已经做了两层校验（行数一致、抄写比例），这里再兜一次 ——
+       * 因为「提示翻译成功、界面上一句译文都没有」是最让人恼火的失败形态：
+       * 用户不知道是自己点错了、网络坏了，还是软件坏了。
+       * 贴不回去就如实说清楚，绝不装作翻好了。
+       */
+      const applied = lyricLines.value.filter((line) => !!line.trans).length
+      if (applied === 0) {
+        translated.value = false
+        translateError.value =
+          '译文已经拿到，但没能对应到歌词行（这首歌的歌词可能换过版本）。可以点「修改译文 / 添加译文」手工填'
+        return false
+      }
+
       translated.value = true
       translatedSongId.value = song.id
       showTranslation.value = true

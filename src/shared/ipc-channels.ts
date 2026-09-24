@@ -35,6 +35,8 @@ export const CH = {
   playReportBadSource: 'play:reportBadSource',
   /** 封面补全：平台没给封面时，按歌名+歌手去别处找一张 */
   coverResolve: 'cover:resolve',
+  /** 把封面图片存到本地 */
+  coverDownload: 'cover:download',
   // 下载
   downloadAdd: 'download:add',
   downloadList: 'download:list',

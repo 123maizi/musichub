@@ -72,11 +72,18 @@ export function reportBadSource(sourceId: string, song: Song, reason?: string): 
 
 /**
  * 补全封面。
- * 平台没给封面（酷我大多没有）或给的是占位图（酷狗）时，
- * 用「歌名 + 歌手」去封面质量更稳的平台找一张。
+ * 平台没给封面（酷我大多没有）时，用「歌名 + 歌手」去封面更全的平台找一张。
  */
 export function resolveCover(song: Song): Promise<string | null> {
   return window.api.player.resolveCover(toPlain(song))
+}
+
+/** 把封面存到本地（默认存进下载目录，文件名与歌曲一致） */
+export function downloadCover(
+  song: Song,
+  dir?: string
+): Promise<{ path: string; bytes: number; from: 'platform' | 'resolved' }> {
+  return window.api.player.downloadCover(toPlain(song), dir)
 }
 
 /* ------------------------------ AI 翻译 ------------------------------ */

@@ -249,12 +249,14 @@ function buildMessages(
 }
 
 /**
- * 译文是否只是把原文抄了一遍。
+ * 译文有多少行只是把原文抄了一遍。
  *
  * 小模型很容易犯这个毛病：格式完全合规、行数也对，但内容就是原文 ——
- * 尤其当歌词里混了它看不懂的字符时。这种结果必须判为失败，
- * 否则会一路显示成「翻译成功」，而用户看到的全是外文
- * —— 这正是「点完翻译不显示译文，只有外文」的来源。
+ * 尤其当歌词里混了它看不懂的字符时。
+ *
+ * 注意这里返回的是**比例**而不是布尔值：只抄一部分同样得判失败。
+ * 实测遇到过「8 行里翻了 2 行、抄了 6 行」—— changedCount > 0 所以算成功，
+ * 而界面上只看得见那两行译文，用户的感觉就是「翻译完了却不显示」。
  */
 function looksLikeEcho(lines: string[], translations: string[]): boolean {
   if (lines.length === 0) return false
@@ -263,7 +265,8 @@ function looksLikeEcho(lines: string[], translations: string[]): boolean {
   for (let i = 0; i < lines.length; i += 1) {
     if (normalize(translations[i] ?? '') === normalize(lines[i])) same += 1
   }
-  return same === lines.length
+  // 阈值 0.5：一半以上原样返回，说明这个格式把模型带偏了，换一种通常就好
+  return same / lines.length >= 0.5
 }
 
 /** 调一次接口，翻一批 */

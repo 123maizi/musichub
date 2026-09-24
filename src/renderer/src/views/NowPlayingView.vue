@@ -16,6 +16,7 @@ import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { bigCoverUrl } from '../utils/cover'
 import { cleanIpcError, formatTime } from '../utils/format'
+import { downloadCover } from '../utils/ipc'
 
 const router = useRouter()
 const player = usePlayerStore()
@@ -261,6 +262,31 @@ function queueCurrent(): void {
     notify('已加入播放队列')
   }
 }
+
+/* ------------------------------ 下载封面 ------------------------------ */
+
+const savingCover = ref(false)
+
+/**
+ * 把当前歌曲的封面存到本地。
+ *
+ * 平台没给封面时由主进程跨平台补一张，所以「没有封面」的歌也能存下来。
+ * 存的是原图尺寸（酷我能要到 1000px），不是列表里那张缩略图。
+ */
+async function saveCover(): Promise<void> {
+  const song = player.current
+  if (!song || savingCover.value) return
+
+  savingCover.value = true
+  try {
+    const result = await downloadCover(song)
+    notify(`封面已保存（${Math.round(result.bytes / 1024)} KB）：${result.path.split('\\').pop()}`)
+  } catch (err) {
+    notify(cleanIpcError(err))
+  } finally {
+    savingCover.value = false
+  }
+}
 </script>
 
 <template>
@@ -326,6 +352,15 @@ function queueCurrent(): void {
           <button class="tool" :disabled="!player.current" @click="queueCurrent">
             <AppIcon name="plus" :size="15" />
             <span>队列</span>
+          </button>
+          <button
+            class="tool"
+            :disabled="!player.current || savingCover"
+            title="把这首歌的封面图片存到下载目录"
+            @click="saveCover"
+          >
+            <AppIcon name="disc" :size="15" />
+            <span>{{ savingCover ? '保存中…' : '存封面' }}</span>
           </button>
         </div>
 
