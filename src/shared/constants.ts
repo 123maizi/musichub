@@ -44,6 +44,99 @@ export const QUALITY_META: Record<string, QualityMeta> = {
 /** 全部音质，从高到低 */
 export const QUALITY_ORDER: Quality[] = ['flac24bit', 'hires', 'flac', '320k', '128k']
 
+/**
+ * 下载格式选项。
+ *
+ * 「音质」这个词对用户来说是抽象的 —— 他想的是「我要一个 MP3」。
+ * 所以下载界面直接摆出格式本身：MP3 / FLAC / 24bit，各自标清楚码率和体积。
+ * id 就是取流层的音质档位，不需要额外的转换层。
+ */
+export interface DownloadFormatOption {
+  /** 存进 download-config.preferQuality 的值 */
+  id: Quality
+  /** 格式名，最大的那行字 */
+  format: string
+  /** 码率副标签 */
+  rate: string
+  /** 一句人话说明 */
+  note: string
+  /** 期望的容器扩展名（仅用于界面，真实容器以文件指纹为准） */
+  ext: string
+  lossless: boolean
+}
+
+export const DOWNLOAD_FORMATS: DownloadFormatOption[] = [
+  {
+    id: '320k',
+    format: 'MP3',
+    rate: '320Kbps',
+    note: '通用性最好 —— 手机、车机、蓝牙音箱都能直接放',
+    ext: 'mp3',
+    lossless: false
+  },
+  {
+    id: '128k',
+    format: 'MP3',
+    rate: '128Kbps',
+    note: '体积最小，同样时长大约只有 320K 的四成',
+    ext: 'mp3',
+    lossless: false
+  },
+  {
+    id: 'flac',
+    format: 'FLAC',
+    rate: '无损',
+    note: '与 CD 同源，体积约为 MP3 的 5 倍，适合收藏',
+    ext: 'flac',
+    lossless: true
+  },
+  {
+    id: 'flac24bit',
+    format: 'FLAC',
+    rate: '24bit 母带',
+    note: 'Hi-Res 规格，发烧级；音源没有时自动降到无损',
+    ext: 'flac',
+    lossless: true
+  }
+]
+
+/**
+ * 历史遗留的音质值 → 现在的格式档位。
+ * 老配置里可能存着 hires，界面上要能对应到「24bit 母带」那一项，
+ * 否则用户打开下载页会看到一个没有任何按钮被选中的空白状态。
+ */
+export const FORMAT_ALIASES: Record<string, Quality> = { hires: 'flac24bit' }
+
+/** 把配置里存的音质值归一到某个格式选项 */
+export function normalizeFormatId(id: Quality | undefined): Quality | undefined {
+  if (!id) return undefined
+  return FORMAT_ALIASES[id] ?? id
+}
+
+/** 按 id 找格式选项 */
+export function findFormat(id: Quality | undefined): DownloadFormatOption | undefined {
+  const normalized = normalizeFormatId(id)
+  if (!normalized) return undefined
+  return DOWNLOAD_FORMATS.find((f) => f.id === normalized)
+}
+
+/**
+ * 从文件名推断真实容器，给界面显示用。
+ * 只认扩展名，不做内容嗅探 —— 内容在下载时已经校验过了。
+ */
+export function containerOf(fileName: string): string {
+  const ext = (fileName.split('.').pop() ?? '').toLowerCase()
+  if (ext === 'mp3') return 'MP3'
+  if (ext === 'flac') return 'FLAC'
+  if (ext === 'm4a' || ext === 'mp4') return 'M4A'
+  if (ext === 'ogg' || ext === 'oga') return 'OGG'
+  if (ext === 'wav') return 'WAV'
+  if (ext === 'aac') return 'AAC'
+  if (ext === 'wma') return 'WMA'
+  if (ext === 'webm') return 'WEBM'
+  return ext ? ext.toUpperCase() : '—'
+}
+
 /** 取音质权重，未知音质给 0 */
 export function qualityRank(q: Quality | undefined): number {
   if (!q) return 0

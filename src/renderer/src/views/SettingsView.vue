@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { AppInfo } from '@shared/types/ipc'
 import { AI_PRESETS, type AiConfig, type AiTestResult } from '@shared/types/ai'
 import { QUALITY_META, QUALITY_ORDER } from '@shared/constants'
+import DownloadFormatPicker from '../components/DownloadFormatPicker.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { usePlayerStore } from '../stores/player'
 import { useSourceStore } from '../stores/sources'
@@ -445,18 +446,15 @@ async function runAiTest(): Promise<void> {
         </div>
 
         <div class="field">
-          <label>首选音质</label>
+          <label>默认下载格式</label>
           <div class="control col gap-4">
-            <select
-              :value="config?.preferQuality ?? '320k'"
-              @change="update({ preferQuality: ($event.target as HTMLSelectElement).value as never })"
-            >
-              <option v-for="q in QUALITY_ORDER" :key="q" :value="q">
-                {{ QUALITY_META[q]?.name }}（{{ QUALITY_META[q]?.short }}）
-              </option>
-            </select>
+            <DownloadFormatPicker
+              :model-value="config?.preferQuality"
+              :disabled="!config"
+              @update:model-value="update({ preferQuality: $event })"
+            />
             <span class="faint note">
-              下载时会优先按此音质取流；音源不支持时自动降级到更低音质，不会直接失败。
+              搜索页点 ↓ 就按这个格式下；音源给不了这么高时自动降到下一档，并标出「已降级」。
             </span>
           </div>
         </div>

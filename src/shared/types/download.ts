@@ -19,6 +19,12 @@ export interface DownloadTask {
   song: Song
   /** 目标音质 */
   quality: Quality
+  /**
+   * 音源实际给出的音质档位。
+   * 音源嘴上答应 24bit、实际只给 320K 是常态，界面上要如实标出来，
+   * 否则用户会以为是下载出了问题。
+   */
+  actualQuality?: Quality
   /** 状态 */
   status: DownloadStatus
   /** 已下载字节 */

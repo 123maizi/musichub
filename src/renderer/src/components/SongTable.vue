@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { Song } from '@shared/types/music'
-import { PLATFORM_META, QUALITY_META, qualityRank } from '@shared/constants'
+import { PLATFORM_META, QUALITY_META, findFormat, qualityRank } from '@shared/constants'
 import { useRouter } from 'vue-router'
 import { formatTime } from '../utils/format'
+import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 
 const props = withDefaults(
@@ -58,6 +60,13 @@ function isSelected(song: Song): boolean {
 
 // 收藏状态直接读音乐库，省得往每一层传 props
 const library = useLibraryStore()
+const downloads = useDownloadStore()
+
+/** 下载按钮的提示写着「下载为 MP3 320Kbps」—— 点之前就知道会拿到什么 */
+const downloadFormatLabel = computed(() => {
+  const f = findFormat(downloads.config?.preferQuality)
+  return f ? `${f.format} ${f.rate}` : '音源最佳'
+})
 const router = useRouter()
 
 /**
@@ -187,7 +196,13 @@ function isLossless(song: Song): boolean {
             {{ isFavorite(song) ? '♥' : '♡' }}
           </button>
           <button class="ghost tiny" title="加入播放队列" @click.stop="emit('queue', song)">＋</button>
-          <button class="ghost tiny" title="下载" @click.stop="emit('download', song)">↓</button>
+          <button
+            class="ghost tiny"
+            :title="`下载为 ${downloadFormatLabel}`"
+            @click.stop="emit('download', song)"
+          >
+            ↓
+          </button>
           <button
             v-if="removable"
             class="ghost tiny danger"

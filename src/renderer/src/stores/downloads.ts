@@ -88,6 +88,11 @@ export const useDownloadStore = defineStore('downloads', () => {
     }
   }
 
+  /** 切换下载格式。就是改 preferQuality，取流层直接按这个档位要流。 */
+  async function setFormat(quality: Quality): Promise<void> {
+    await setConfig({ preferQuality: quality })
+  }
+
   async function chooseDir(): Promise<void> {
     const dir = await window.api.download.chooseDir()
     if (dir) await loadConfig()
@@ -169,6 +174,7 @@ export const useDownloadStore = defineStore('downloads', () => {
     refresh,
     audit,
     markMissing,
+    setFormat,
     loadConfig,
     setConfig,
     chooseDir,

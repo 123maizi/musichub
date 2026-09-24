@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import type { DownloadTask } from '@shared/types/download'
-import type { Song } from '@shared/types/music'
-import { PLATFORM_META, QUALITY_META } from '@shared/constants'
+import type { Quality, Song } from '@shared/types/music'
+import {
+  PLATFORM_META,
+  QUALITY_META,
+  containerOf,
+  findFormat
+} from '@shared/constants'
 import { useDownloadStore } from '../stores/downloads'
 import { usePlayerStore } from '../stores/player'
 import { formatBytes, formatSpeed } from '../utils/format'
+import DownloadFormatPicker from '../components/DownloadFormatPicker.vue'
 
 const downloads = useDownloadStore()
 const player = usePlayerStore()
@@ -35,6 +41,60 @@ function statusClass(task: DownloadTask): string {
   if (task.status === 'error') return 'err'
   if (task.status === 'downloading') return 'accent'
   return ''
+}
+
+/**
+ * 这一行显示「实际拿到的是什么格式」。
+ *
+ * 下载中还没落盘，就显示你选的那个格式；下完了一律按文件扩展名说话 ——
+ * 音源常常嘴上答应 FLAC、给的却是 M4A，与其显示期望值，不如显示事实。
+ */
+function formatTag(task: DownloadTask): string {
+  if (task.status === 'done' || task.status === 'error') {
+    return containerOf(task.fileName)
+  }
+  return formatLabel(task.quality)
+}
+
+function formatLabel(quality: Quality | undefined): string {
+  const f = findFormat(quality)
+  return f ? `${f.format} ${f.rate}` : (QUALITY_META[quality ?? '']?.short ?? quality ?? '—')
+}
+
+function isLosslessTask(task: DownloadTask): boolean {
+  if (task.status === 'done') {
+    return ['FLAC', 'WAV', 'ALAC'].includes(containerOf(task.fileName))
+  }
+  return findFormat(task.quality)?.lossless ?? false
+}
+
+/**
+ * 「你要的」和「实际拿到的」对不上时给出说明文案，对得上就返回 null。
+ *
+ * 音源经常口是心非：要 MP3 给 M4A、要无损给有损。不说清楚的话，
+ * 用户只会觉得「我明明选了 MP3，怎么下出来个 m4a，是不是坏了」。
+ * 这里只负责措辞，配色交给调用方的 warn-tag。
+ */
+function mismatchNote(task: DownloadTask): string | null {
+  if (task.status !== 'done') return null
+  const want = findFormat(task.quality)
+  const got = containerOf(task.fileName)
+  if (!want || got.toLowerCase() === want.ext) return null
+  return `你要的是 ${want.format} ${want.rate}，音源实际给的是 ${got} 容器。音频本身是完整可播的，只是封装格式不同。`
+}
+
+/**
+ * 音源没给到你要的档位时为真（例如选了 24bit 母带、只拿到 320K）。
+ * 同为无损档位之间的差别不值得啰嗦，只报真正的降级。
+ */
+function downgradeNote(task: DownloadTask): string | null {
+  if (!task.actualQuality || !task.quality || task.actualQuality === task.quality) return null
+  const want = findFormat(task.quality)
+  const got = findFormat(task.actualQuality)
+  if (want?.lossless && got?.lossless && want.format === got.format) return null
+  return `你选的是 ${want ? `${want.format} ${want.rate}` : task.quality}，音源最高只给到 ${
+    got ? `${got.format} ${got.rate}` : task.actualQuality
+  }。`
 }
 
 async function pauseAll(): Promise<void> {
@@ -176,6 +236,22 @@ function isPlayingTask(task: DownloadTask): boolean {
       <div v-if="downloads.config?.dir" class="dir-line mono faint ellipsis">
         {{ downloads.config.dir }}
       </div>
+
+      <!--
+        下载格式：直接摆在最显眼的位置。
+        以前要改格式得专门跑一趟设置页、还得先弄懂「首选音质」是什么意思。
+      -->
+      <div class="format-block">
+        <div class="format-head">
+          <span class="format-label">下载格式</span>
+          <span class="faint small-text">选好后，搜索页点 ↓ 就按这个格式下</span>
+        </div>
+        <DownloadFormatPicker
+          :model-value="downloads.config?.preferQuality"
+          :disabled="!downloads.config"
+          @update:model-value="downloads.setFormat"
+        />
+      </div>
     </header>
 
     <div v-if="downloads.tasks.length === 0" class="empty">
@@ -193,7 +269,24 @@ function isPlayingTask(task: DownloadTask): boolean {
           <div class="line1">
             <span class="name ellipsis" :title="task.fileName">{{ task.song.name }}</span>
             <span class="tag" :class="statusClass(task)">{{ STATUS_LABEL[task.status] ?? task.status }}</span>
-            <span class="tag">{{ QUALITY_META[task.quality]?.short ?? task.quality }}</span>
+            <!--
+              格式标签只留一个：完成后显示真实拿到的容器，
+              和你选的不一致时变琥珀色并把差别写进提示里 —— 不重复堆两个标签。
+            -->
+            <span
+              class="tag"
+              :class="{ accent: isLosslessTask(task), 'warn-tag': !!mismatchNote(task) }"
+              :title="mismatchNote(task) ?? ''"
+            >
+              {{ formatTag(task) }}
+            </span>
+            <span
+              v-if="downgradeNote(task)"
+              class="tag warn-tag"
+              :title="downgradeNote(task) ?? ''"
+            >
+              已降级
+            </span>
           </div>
 
           <div class="line2 faint ellipsis">
@@ -337,6 +430,33 @@ function isPlayingTask(task: DownloadTask): boolean {
 
 .dir-line {
   font-size: 11px;
+}
+
+/* ------------------------------ 下载格式 ------------------------------ */
+
+.format-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0 2px;
+  border-top: 1px solid var(--line);
+}
+
+.format-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.format-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.warn-tag {
+  border-color: color-mix(in srgb, #e0a336 60%, transparent);
+  color: #e0a336;
 }
 
 /* ------------------------------ 列表 ------------------------------ */

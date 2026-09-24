@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { PLATFORM_META } from '@shared/constants'
 import type { Song } from '@shared/types/music'
 import SongTable from '../components/SongTable.vue'
+import DownloadFormatPicker from '../components/DownloadFormatPicker.vue'
 import { useAlbumStore, type AlbumInfo } from '../stores/album'
 import { useArtistStore, type ArtistInfo } from '../stores/artist'
 import { useSearchStore } from '../stores/search'
@@ -207,6 +208,17 @@ async function downloadSelected(): Promise<void> {
           >
             全部下载
           </button>
+
+          <!-- 下载格式：摆在这里才能「先选格式，再点下载」 -->
+          <div class="fmt-inline" title="点 ↓ 下载时用这个格式">
+            <span class="faint small-text">下载格式</span>
+            <DownloadFormatPicker
+              compact
+              :model-value="downloads.config?.preferQuality"
+              :disabled="!downloads.config"
+              @update:model-value="downloads.setFormat"
+            />
+          </div>
         </template>
 
         <template v-else-if="mode === 'artist'">
@@ -417,6 +429,14 @@ async function downloadSelected(): Promise<void> {
 
 .small-text {
   font-size: 11.5px;
+}
+
+/* 搜索页工具条里的下载格式选择：先选格式，再点 ↓ */
+.fmt-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 4px;
 }
 
 /* ------------------------------ 平台标签 ------------------------------ */

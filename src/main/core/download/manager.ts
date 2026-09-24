@@ -418,6 +418,8 @@ export class DownloadManager extends EventEmitter {
     const prevSourceId = task.sourceId
     task.sourceId = resolved.sourceId
     task.sourceName = resolved.sourceName
+    // 音源实际给的档位可能低于请求值（自动降级），记下来给界面如实展示
+    if (resolved.quality) task.actualQuality = resolved.quality
 
     // 扩展名以真实地址为准。改名后可能撞上别的任务/别的文件，所以走 freePath 找空位，
     // 绝不能直接落在一个已存在的文件上（下一步的 renameSync 会把它覆盖掉）。
