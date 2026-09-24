@@ -166,12 +166,26 @@ function textFrame(id: string, text: string): Buffer | null {
   return Buffer.concat([header, body])
 }
 
-/** 构造注释帧 COMM */
+/**
+ * 构造注释帧 COMM。
+ *
+ * 结构：编码(1) + 语言(3) + 描述串 + 结束符 + 正文。
+ *
+ * 这里的结束符宽度必须跟着编码走，这是个非常隐蔽的坑：
+ * 编码字节是 0x01（UTF-16），描述串的结束符就必须是**两个** 00。
+ * 只写一个 00 的话，解析器会按 2 字节去读结束符，于是把正文 BOM 的第一个字节
+ * 也当成结束符吃掉，从这一位起整个正文错位一格、后面的字符全部对不上。
+ *
+ * 后果不是「注释显示乱码」那么轻 —— Windows 的 Media Foundation 判定整个
+ * ID3 标签畸形，直接以 0xC00D3E8C 拒播这个文件。Chromium 宽容，照放不误，
+ * 所以只测浏览器根本发现不了，必须拿系统解码器验。
+ */
 function commentFrame(text: string): Buffer | null {
   if (!text) return null
   const body = Buffer.concat([
     Buffer.from([0x01]), // UTF-16 with BOM
-    Buffer.from('XXX\0', 'latin1'), // 语言
+    Buffer.from('XXX', 'latin1'), // 语言：固定 3 字节，不要带 \0
+    Buffer.from([0x00, 0x00]), // 空描述串的 UTF-16 结束符（两个字节）
     Buffer.from('\uFEFF' + text, 'utf16le')
   ])
   const header = Buffer.alloc(10)

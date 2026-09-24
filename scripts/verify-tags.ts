@@ -66,7 +66,7 @@ function firstChunkOffset(buf: Buffer): number | null {
 
 const cases = [
   { file: '蛋堡 - 收敛水.m4a', label: 'M4A' },
-  { file: 'Army Of Lovers - Crucified.mp3', label: 'MP3' },
+  { file: 'Corbon Amodio - lucy~.mp3', label: 'MP3' },
   { file: '20 Min - Lil Uzi Vert.flac', label: 'FLAC' }
 ]
 
@@ -131,6 +131,82 @@ for (const c of cases) {
     const sync = after[audioAt] === 0xff && (after[audioAt + 1] & 0xe0) === 0xe0
     console.log(`  ID3 长度 ${id3Size}，音频从 ${audioAt} 开始，同步字: ${sync ? '✓' : '✗'}`)
     console.log(`  含 TPE2(专辑艺术家): ${after.includes(Buffer.from('TPE2', 'latin1')) ? '✓' : '✗'}`)
+
+    /**
+     * 帧内部结构必须逐个走一遍。
+     *
+     * 只看「标签结束后是不是帧同步字」是不够的：COMM 这种带内嵌字符串的帧，
+     * 结束符宽度写错（UTF-16 却只写一个 00）时，整段标签长度依然自洽、
+     * 帧头也照样对得上，但 Windows 的 Media Foundation 会判定标签畸形、
+     * 以 0xC00D3E8C 拒播整个文件 —— 而 Chromium 宽容，照放不误。
+     * 这个检查就是那次事故留下的闸门。
+     */
+    const tagEnd = audioAt
+    let q = 10
+    let structOk = true
+    const found: string[] = []
+    while (q + 10 <= tagEnd) {
+      const id = after.toString('ascii', q, q + 4)
+      if (!/^[A-Z0-9]{4}$/.test(id)) break
+      const size = after.readUInt32BE(q + 4)
+      const data = after.subarray(q + 10, q + 10 + size)
+      found.push(`${id}(${size})`)
+      if (q + 10 + size > tagEnd) {
+        console.log(`  ✗ ${id} 帧越过标签末尾`)
+        structOk = false
+        break
+      }
+
+      /* 带内嵌字符串的帧：结束符宽度必须跟编码匹配 */
+      const enc = data[0]
+      const wide = enc === 1 || enc === 2
+      if (id === 'COMM') {
+        if ((data[1] !== 0x58 || data[2] !== 0x58 || data[3] !== 0x58) && data.length >= 4) {
+          // 语言不一定是 XXX，只做提示，不算错
+        }
+        let r = 4
+        if (wide) {
+          while (r + 1 < data.length && !(data[r] === 0 && data[r + 1] === 0)) r += 2
+          const termOk = r + 1 < data.length && data[r] === 0 && data[r + 1] === 0
+          const textAt = r + 2
+          const bom = data.subarray(textAt, textAt + 2)
+          const bomOk = bom[0] === 0xff && bom[1] === 0xfe
+          console.log(
+            `  COMM 编码=${enc}(UTF-16) 描述结束符: ${termOk ? '✓ 两个 00' : '✗ 不是两个 00'}` +
+              `  正文 BOM: ${bomOk ? '✓ fffe' : `✗ ${bom.toString('hex')}`}`
+          )
+          if (!termOk || !bomOk) structOk = false
+        } else {
+          let r = 4
+          while (r < data.length && data[r] !== 0) r += 1
+          console.log(`  COMM 编码=${enc}(单字节) 描述结束符: ${data[r] === 0 ? '✓' : '✗'}`)
+        }
+      }
+      if (id === 'APIC') {
+        let r = 1
+        while (r < data.length && data[r] !== 0) r += 1
+        r += 1 // mime 结束符
+        r += 1 // 图片类型
+        if (enc === 1 || enc === 2) {
+          while (r + 1 < data.length && !(data[r] === 0 && data[r + 1] === 0)) r += 2
+          r += 2
+        } else {
+          while (r < data.length && data[r] !== 0) r += 1
+          r += 1
+        }
+        const sig = data.subarray(r, r + 3)
+        const isJpg = sig[0] === 0xff && sig[1] === 0xd8
+        const isPng = sig[0] === 0x89 && sig[1] === 0x50
+        console.log(
+          `  APIC 描述结束符宽度与编码(${enc})匹配: 图片头=${isJpg ? 'JPEG' : isPng ? 'PNG' : sig.toString('hex')}`
+        )
+        if (!isJpg && !isPng) structOk = false
+      }
+
+      q += 10 + size
+    }
+    console.log(`  帧清单: ${found.join(' ')}`)
+    console.log(`  帧内部结构: ${structOk ? '✓ 全部合规' : '✗ 有问题（Windows 解码器会拒播）'}`)
   } else if (c.label === 'FLAC') {
     let pos = 4
     let streamFirst = false
