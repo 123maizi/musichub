@@ -51,11 +51,39 @@ export class StreamProxy {
    */
   private localRoots: string[] = []
 
+  /**
+   * 动态白名单来源。
+   *
+   * 只注册「当前下载目录」是不够的 —— 用户一旦改过下载目录，
+   * 老目录里已经下好的歌就全被 403 挡在门外：文件明明在磁盘上、
+   * 任务也写着已完成，点播放却什么都听不到。
+   * 所以这里改成每次请求都现算：当前下载目录 + 默认目录 +
+   * 下载任务记录里出现过的每一个目录。
+   */
+  private localRootsProvider: (() => string[]) | null = null
+
   /** 注册允许读取的目录（主进程在拿到下载目录后调用） */
   setLocalRoots(roots: string[]): void {
     this.localRoots = roots
       .filter(Boolean)
       .map((dir) => resolve(dir).replace(/[\\/]+$/, '').toLowerCase())
+  }
+
+  /** 注册动态白名单来源，优先级高于静态列表 */
+  setLocalRootsProvider(fn: () => string[]): void {
+    this.localRootsProvider = fn
+  }
+
+  /** 当前生效的白名单目录 */
+  private roots(): string[] {
+    if (!this.localRootsProvider) return this.localRoots
+    try {
+      return this.localRootsProvider()
+        .filter(Boolean)
+        .map((dir) => resolve(dir).replace(/[\\/]+$/, '').toLowerCase())
+    } catch {
+      return this.localRoots
+    }
   }
 
   /** 启动代理服务，返回实际端口 */
@@ -406,9 +434,10 @@ export class StreamProxy {
 
   /** 路径是否落在允许的目录内 */
   private isInsideRoots(full: string): boolean {
-    if (this.localRoots.length === 0) return false
+    const roots = this.roots()
+    if (roots.length === 0) return false
     const target = full.toLowerCase()
-    return this.localRoots.some((root) => {
+    return roots.some((root) => {
       if (target === root) return false
       const rel = relative(root, target)
       // rel 不以 .. 开头且不是绝对路径 → 确实在目录内

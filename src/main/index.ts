@@ -125,14 +125,14 @@ async function bootstrap(): Promise<void> {
   })
 
   /**
-   * 把下载目录登记为「允许本地播放」的白名单。
+   * 把「允许本地播放」的目录登记给代理。
    * 代理只放行白名单内的路径 —— 它是本机端口，不能变成任意文件读取接口。
+   *
+   * 白名单必须是动态的：[当前下载目录, 默认目录, 下载记录里出现过的每个目录]。
+   * 只认当前下载目录的话，用户改一次下载目录，老目录里已经下好的歌
+   * 会被 403 全部挡掉 —— 文件在磁盘上、任务写着已完成，点播放却没声音。
    */
   proxy.setLocalRoots([configStore.get().dir, defaultDownloadDir])
-  // 用户改了下载目录也要跟着更新，否则换目录后新下的歌又播不了
-  configStore.onChange((next) => {
-    proxy.setLocalRoots([next.dir, defaultDownloadDir])
-  })
 
   /**
    * AI 翻译配置。
@@ -193,6 +193,21 @@ async function bootstrap(): Promise<void> {
     ),
     onLog: log
   })
+
+  /**
+   * 本地播放白名单改成动态计算。
+   *
+   * 从前的白名单只有 [当前下载目录, 默认目录]，而且是配置变化时才更新。
+   * 后果：用户改一次下载目录，老目录里已经下好的歌全部被代理 403 挡掉 ——
+   * 文件就在磁盘上、任务也写着已完成，点播放却什么都听不到。
+   * 现在把「下载记录里出现过的每个目录」也算进去，换目录不再牵连老歌。
+   */
+  proxy.setLocalRootsProvider(() => [
+    configStore.get().dir,
+    defaultDownloadDir,
+    ...downloads.listDirs()
+  ])
+
   // 音乐库：喜欢 / 历史 / 歌单统一落在用户数据目录
   const library = new LibraryService(join(userData, 'library.json'))
 

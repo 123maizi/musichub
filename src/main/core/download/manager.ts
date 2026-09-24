@@ -22,7 +22,7 @@ import {
   rmSync,
   statSync
 } from 'node:fs'
-import { join, normalize, resolve, sep } from 'node:path'
+import { dirname, join, normalize, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import type {
@@ -173,6 +173,25 @@ export class DownloadManager extends EventEmitter {
 
   list(): DownloadTask[] {
     return [...this.tasks.values()].sort((a, b) => b.createdAt - a.createdAt)
+  }
+
+  /**
+   * 下载任务记录里出现过的所有目录（去重）。
+   *
+   * 用来扩本地播放白名单：改过下载目录之后，老目录里已下好的歌
+   * 仍然要能播 —— 它们就躺在磁盘上，凭什么因为设置变了就播不了。
+   */
+  listDirs(): string[] {
+    const dirs = new Set<string>()
+    for (const t of this.tasks.values()) {
+      if (!t.savePath) continue
+      try {
+        dirs.add(dirname(t.savePath))
+      } catch {
+        /* 路径异常就跳过 */
+      }
+    }
+    return [...dirs]
   }
 
   /**
@@ -446,62 +465,63 @@ export class DownloadManager extends EventEmitter {
     this.emit('progress', { ...task })
     await this.streamToFile(resolved.url, partPath, task, signal)
 
-    // 3) 落盘：.part → 正式文件。
-    //    先确认目标路径没有被别的在途任务占用；被占用就让开，绝不删别人的成品。
-    //    （磁盘上已有的同名文件不算冲突：覆盖/跳过是用户明确选的语义。）
-    if (this.heldByActive(task.savePath, task.id)) {
-      const target = this.freePath(task.savePath, task.id)
-      this.deps.onLog?.(
-        'warn',
-        'download',
-        `${task.fileName} → ${target.slice(target.lastIndexOf(sep) + 1)}（避免覆盖正在下载的文件）`
-      )
-      task.savePath = target
-      task.fileName = target.slice(target.lastIndexOf(sep) + 1)
-    }
-    if (existsSync(task.savePath)) rmSync(task.savePath, { force: true })
-    renameSync(partPath, task.savePath)
-
     /**
-     * 3.5) 校验「下下来的确实是音频」。
+     * 3) 先校验「下下来的确实是音频」，**再**决定落盘去哪。
      *
-     * 音源出问题时，返回的地址可能指向一个网页、一段 JSON 或空响应 ——
-     * 这些内容照样会被写进文件、任务照样显示「已完成」，
-     * 直到用户去播放才发现「文件损坏」。那时候已经晚了。
-     * 所以这里按文件头指纹检查，不合格就判失败并删掉文件，
-     * 宁可明确报错，也不留一个假装成功的坏文件。
+     * 顺序是这里最关键的一件事。旧代码是先 renameSync 覆盖到目标路径、
+     * 再校验内容，校验失败就把刚覆盖上去的文件删掉 ——
+     * 于是「重下一首歌」最坏的结果是：用户原来的成品被覆盖，新文件又不合格被删，
+     * 两头落空，只剩一个指向空气的任务记录。用户看到的就是「下载完听不了」。
+     *
+     * 音源出问题时返回的地址可能指向一个网页、一段 JSON 或空响应，
+     * 这些内容照样会被写进文件、任务照样显示「已完成」，直到播放才发现坏了。
+     * 所以：不合格就只丢弃 .part，绝不去碰目标路径上的任何东西。
      */
-    const head = this.readHead(task.savePath, 64)
+    const head = this.readHead(partPath, 64)
     const format = sniffAudioFormat(head)
     if (!format) {
       try {
-        rmSync(task.savePath, { force: true })
+        rmSync(partPath, { force: true })
       } catch {
         /* 删不掉也不影响结论 */
       }
-      throw new Error(`下到的内容不是音频（已删除）：${describeNonAudio(head)}`)
+      throw new Error(`下到的内容不是音频（已丢弃临时文件）：${describeNonAudio(head)}`)
     }
 
-    // 扩展名与真实格式不符时纠正一下，免得播放器按扩展名解码失败
+    /**
+     * 3.5) 定下最终文件名。
+     *
+     * 规划阶段扩展名被硬编码成 .mp3（真实容器要等取流后才知道），
+     * 所以「这个名字被占了吗」是在错误的扩展名下判断的。这里按真实格式再核一遍：
+     * 目标要么被别的任务占着，要么在非覆盖语义下已经存在 ——
+     * 两种情况都必须让开，绝不删掉别人（或用户自己）的成品。
+     */
+    const want = task.savePath.replace(/\.[^.\\/]+$/, `.${format.ext}`)
     const mismatch = extMismatch(task.savePath.split('.').pop() ?? '', format)
     if (mismatch) {
       this.deps.onLog?.('warn', 'download', `${task.fileName}: ${mismatch}，已按真实格式改正`)
-      const fixed = this.freePath(
-        task.savePath.replace(/\.[^.\\/]+$/, `.${format.ext}`),
-        task.id
-      )
-      if (fixed !== task.savePath) {
-        try {
-          renameSync(task.savePath, fixed)
-          task.savePath = fixed
-          task.fileName = task.fileName.replace(/\.[^.\\/]+$/, `.${format.ext}`)
-        } catch {
-          /* 改名失败不致命，文件内容是对的 */
-        }
-      }
     }
+    const overwriteMode = config.conflict === 'overwrite'
+    const blocked =
+      this.claimedByOtherTask(want, task.id) ||
+      this.heldByActive(want, task.id) ||
+      (!overwriteMode && existsSync(want))
+    const target = blocked ? this.freePath(want, task.id) : want
+    if (target !== task.savePath) {
+      this.deps.onLog?.(
+        'warn',
+        'download',
+        `${task.fileName} → ${target.slice(target.lastIndexOf(sep) + 1)}（避免覆盖已有文件）`
+      )
+    }
+    task.savePath = target
+    task.fileName = target.slice(target.lastIndexOf(sep) + 1)
 
-    // 4) 写标签（失败不影响下载结果）
+    // 4) 落盘。到这里手上已经有「确认是音频」的 .part 了，覆盖才是安全的
+    if (existsSync(task.savePath)) rmSync(task.savePath, { force: true })
+    renameSync(partPath, task.savePath)
+
+    // 5) 写标签（失败不影响下载结果）
     if (task.writeTag && config.writeTag) {
       try {
         /**
@@ -644,26 +664,19 @@ export class DownloadManager extends EventEmitter {
    * 「这个路径现在能不能用」的判定。
    *
    * 三种占用来源缺一不可：
-   *  1. 其它在途任务（排队/下载中/暂停）已规划的路径 —— 磁盘上还没有文件，
-   *     但马上就会有，只看 existsSync 会漏掉这一整类冲突；
+   *  1. 其它任务已规划/已落盘的路径 —— 磁盘上可能还没有文件，但马上就会有，
+   *     只看 existsSync 会漏掉并发这一整类冲突（这正是文件名互相覆盖的根源）；
    *  2. 磁盘上已存在的正式文件；
    *  3. 磁盘上已存在的 .part（上次中断留下的，续传要用，不能被顶掉）。
    */
   private occupancy(selfId?: string): (p: string) => boolean {
-    const active = new Set<string>()
+    const claimed = new Set<string>()
     for (const t of this.tasks.values()) {
       if (t.id === selfId) continue
-      if (
-        t.status === 'waiting' ||
-        t.status === 'pending' ||
-        t.status === 'downloading' ||
-        t.status === 'paused'
-      ) {
-        active.add(pathKey(t.savePath))
-      }
+      claimed.add(pathKey(t.savePath))
     }
     return (p: string): boolean =>
-      active.has(pathKey(p)) || existsSync(p) || existsSync(`${p}.part`)
+      claimed.has(pathKey(p)) || existsSync(p) || existsSync(`${p}.part`)
   }
 
   /** 给 desired 找一个真正空闲的路径（同目录内递增序号，保留扩展名） */
@@ -700,6 +713,22 @@ export class DownloadManager extends EventEmitter {
   }
 
   /**
+   * 该路径是否已经被「别的任务」认领（不论那个任务处于什么状态）。
+   *
+   * 比 heldByActive 更严：一条任务只要记着这个路径，别的任务就不该染指。
+   * 只用「在途状态」判断会漏掉一个窗口 —— 对方刚下完、状态已经变成 done，
+   * 而文件正好在这一瞬被写出来，检查落空，随后 rmSync 就把它的成品删了。
+   */
+  private claimedByOtherTask(p: string, selfId?: string): boolean {
+    const key = pathKey(p)
+    for (const t of this.tasks.values()) {
+      if (t.id === selfId) continue
+      if (pathKey(t.savePath) === key) return true
+    }
+    return false
+  }
+
+  /**
    * 任务专属的临时文件路径。
    *
    * 带上任务 id，保证任何情况下都不会有两个任务共用同一个 .part
@@ -726,16 +755,11 @@ export class DownloadManager extends EventEmitter {
     const taken = this.occupancy()
     if (!taken(savePath)) return { fileName, savePath }
 
-    // 覆盖 / 跳过只对「磁盘上已有的历史文件」有意义；被在途任务占用的路径必须让开
-    const heldByActive = [...this.tasks.values()].some(
-      (t) =>
-        pathKey(t.savePath) === pathKey(savePath) &&
-        (t.status === 'waiting' ||
-          t.status === 'pending' ||
-          t.status === 'downloading' ||
-          t.status === 'paused')
-    )
-    if (!heldByActive && (config.conflict === 'overwrite' || config.conflict === 'skip')) {
+    // 覆盖 / 跳过只对「磁盘上已有的历史文件」有意义；别的任务认领了就必须让开
+    if (
+      !this.claimedByOtherTask(savePath) &&
+      (config.conflict === 'overwrite' || config.conflict === 'skip')
+    ) {
       return { fileName, savePath }
     }
 
