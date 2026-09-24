@@ -454,9 +454,13 @@ function isPlayingTask(task: DownloadTask): boolean {
   color: var(--text);
 }
 
+/*
+ * 「和你选的不一样」用 danger 色，别用琥珀 —— 应用的主色就是金色 #d4a24c，
+ * 再用一个近似的琥珀标警告，会跟「已选中」的格式按钮撞脸，反而看不出来。
+ */
 .warn-tag {
-  border-color: color-mix(in srgb, #e0a336 60%, transparent);
-  color: #e0a336;
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
 }
 
 /* ------------------------------ 列表 ------------------------------ */
