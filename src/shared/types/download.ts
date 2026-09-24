@@ -36,6 +36,12 @@ export interface DownloadTask {
   /** 实际提供音源 */
   sourceId?: string
   sourceName?: string
+  /**
+   * 生成当前 .part 时用的音源 id。
+   * 续传只在同一个音源上做：换了音源，同一个字节偏移指向的并不是同一段数据，
+   * 把 B 的后半段接到 A 的前半段上，下载会「成功」，文件却是坏的。
+   */
+  partSourceId?: string
   /** 错误信息 */
   error?: string
   /** 创建时间 */
@@ -44,6 +50,14 @@ export interface DownloadTask {
   finishedAt?: number
   /** 是否写入元数据标签 */
   writeTag: boolean
+}
+
+/** 已完成任务的文件体检结果，键为任务 id */
+export interface DownloadFileAudit {
+  exists: boolean
+  size: number
+  /** 轻量判定：体积为 0 或明显小于合理值时为 true */
+  suspicious: boolean
 }
 
 /** 新建下载任务参数 */

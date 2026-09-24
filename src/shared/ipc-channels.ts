@@ -50,6 +50,8 @@ export const CH = {
   downloadChooseDir: 'download:chooseDir',
   downloadOpenFile: 'download:openFile',
   downloadShowInFolder: 'download:showInFolder',
+  /** 体检：已完成任务的文件是否还在磁盘上 */
+  downloadAudit: 'download:audit',
   // 音乐库（我的喜欢 / 历史播放 / 歌单）
   librarySnapshot: 'library:snapshot',
   libraryStats: 'library:stats',

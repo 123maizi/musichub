@@ -22,12 +22,13 @@ import {
   rmSync,
   statSync
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, normalize, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import type {
   DownloadAddRequest,
   DownloadConfig,
+  DownloadFileAudit,
   DownloadTask
 } from '@shared/types/download'
 import type { Quality, Song } from '@shared/types/music'
@@ -174,6 +175,32 @@ export class DownloadManager extends EventEmitter {
     return [...this.tasks.values()].sort((a, b) => b.createdAt - a.createdAt)
   }
 
+  /**
+   * 体检：已完成任务指向的文件到底还在不在。
+   *
+   * 「任务列表里明明写着已完成，点播放却没声音」最常见的成因就是文件已经不在了
+   * —— 被同名任务覆盖过、被用户手动清理过、或者上一次删除任务时被连带删掉了。
+   * 与其等播放时报一个笼统的失败，不如把状态直接标在列表上。
+   */
+  audit(): Record<string, DownloadFileAudit> {
+    const out: Record<string, DownloadFileAudit> = {}
+    for (const t of this.tasks.values()) {
+      if (t.status !== 'done') continue
+      let exists = false
+      let size = 0
+      try {
+        if (existsSync(t.savePath)) {
+          exists = true
+          size = statSync(t.savePath).size
+        }
+      } catch {
+        exists = false
+      }
+      out[t.id] = { exists, size, suspicious: exists && size < 4096 }
+    }
+    return out
+  }
+
   /** 暂停（中止当前连接，保留 .part 以便续传） */
   async pause(ids: string[]): Promise<void> {
     for (const id of ids) {
@@ -230,11 +257,31 @@ export class DownloadManager extends EventEmitter {
       if (idx >= 0) this.queue.splice(idx, 1)
 
       if (deleteFile) {
-        for (const p of [task.savePath, `${task.savePath}.part`]) {
-          try {
-            if (existsSync(p)) rmSync(p, { force: true })
-          } catch {
-            /* 文件可能被其它程序占用 */
+        const key = pathKey(task.savePath)
+        const shared = [...this.tasks.values()].some(
+          (t) => t.id !== id && pathKey(t.savePath) === key
+        )
+        if (shared) {
+          this.deps.onLog?.(
+            'warn',
+            'download',
+            `跳过删除（另有任务指向同一文件）: ${task.fileName}`
+          )
+        } else if (!isInsideDir(task.savePath, this.getConfig().dir)) {
+          // 安全阀：只允许删除下载目录以内的文件
+          this.deps.onLog?.(
+            'warn',
+            'download',
+            `跳过删除（不在下载目录内）: ${task.savePath}`
+          )
+        } else {
+          // 新命名 + 旧命名都清一遍，免得老任务留下残骸
+          for (const p of [task.savePath, this.partPathOf(task), `${task.savePath}.part`]) {
+            try {
+              if (existsSync(p)) rmSync(p, { force: true })
+            } catch {
+              /* 文件可能被其它程序占用 */
+            }
           }
         }
       }
@@ -349,24 +396,69 @@ export class DownloadManager extends EventEmitter {
       song: task.song,
       quality: task.quality
     })
+    const prevSourceId = task.sourceId
     task.sourceId = resolved.sourceId
     task.sourceName = resolved.sourceName
 
-    // 扩展名以真实地址为准
+    // 扩展名以真实地址为准。改名后可能撞上别的任务/别的文件，所以走 freePath 找空位，
+    // 绝不能直接落在一个已存在的文件上（下一步的 renameSync 会把它覆盖掉）。
     if (resolved.ext && !task.savePath.toLowerCase().endsWith(`.${resolved.ext}`)) {
-      task.savePath = task.savePath.replace(/\.[a-z0-9]+$/i, `.${resolved.ext}`)
-      task.fileName = task.fileName.replace(/\.[a-z0-9]+$/i, `.${resolved.ext}`)
+      const want = task.savePath.replace(/\.[a-z0-9]+$/i, `.${resolved.ext}`)
+      const safe = this.freePath(want, task.id)
+      const safeName = safe.slice(safe.lastIndexOf(sep) + 1)
+      if (safe !== want) {
+        this.deps.onLog?.('warn', 'download', `${task.fileName} → ${safeName}（避免与已有文件冲突）`)
+      }
+      task.savePath = safe
+      task.fileName = safeName
     }
 
     if (!existsSync(config.dir)) mkdirSync(config.dir, { recursive: true })
-    const partPath = `${task.savePath}.part`
+    const partPath = this.partPathOf(task)
+
+    /**
+     * 换源就不续传。
+     *
+     * 续传的语义是「接着上次没下完的地方继续」，前提是两段字节来自同一个文件。
+     * 一旦这次解析到了别的音源，同一个偏移指向的是另一段数据，硬接起来会得到
+     * 一个「下载成功」的坏文件 —— 前半段一个编码器、后半段另一个。
+     * 宁可丢掉那点已下载的进度重来，也不要交出一个播不了的文件。
+     */
+    if (existsSync(partPath) && task.partSourceId && prevSourceId && task.partSourceId !== task.sourceId) {
+      this.deps.onLog?.(
+        'warn',
+        'download',
+        `音源已变化（${task.partSourceId} → ${task.sourceId}），丢弃上次残留重新下载: ${task.fileName}`
+      )
+      try {
+        rmSync(partPath, { force: true })
+      } catch {
+        /* 删不掉就让它去撞下面的覆盖写 */
+      }
+      task.received = 0
+      task.total = 0
+      task.progress = 0
+    }
+    task.partSourceId = task.sourceId
 
     // 2) 下载（带断点续传）
     task.status = 'downloading'
     this.emit('progress', { ...task })
     await this.streamToFile(resolved.url, partPath, task, signal)
 
-    // 3) 落盘：.part → 正式文件
+    // 3) 落盘：.part → 正式文件。
+    //    先确认目标路径没有被别的在途任务占用；被占用就让开，绝不删别人的成品。
+    //    （磁盘上已有的同名文件不算冲突：覆盖/跳过是用户明确选的语义。）
+    if (this.heldByActive(task.savePath, task.id)) {
+      const target = this.freePath(task.savePath, task.id)
+      this.deps.onLog?.(
+        'warn',
+        'download',
+        `${task.fileName} → ${target.slice(target.lastIndexOf(sep) + 1)}（避免覆盖正在下载的文件）`
+      )
+      task.savePath = target
+      task.fileName = target.slice(target.lastIndexOf(sep) + 1)
+    }
     if (existsSync(task.savePath)) rmSync(task.savePath, { force: true })
     renameSync(partPath, task.savePath)
 
@@ -394,7 +486,10 @@ export class DownloadManager extends EventEmitter {
     const mismatch = extMismatch(task.savePath.split('.').pop() ?? '', format)
     if (mismatch) {
       this.deps.onLog?.('warn', 'download', `${task.fileName}: ${mismatch}，已按真实格式改正`)
-      const fixed = task.savePath.replace(/\.[^.\\/]+$/, `.${format.ext}`)
+      const fixed = this.freePath(
+        task.savePath.replace(/\.[^.\\/]+$/, `.${format.ext}`),
+        task.id
+      )
       if (fixed !== task.savePath) {
         try {
           renameSync(task.savePath, fixed)
@@ -545,6 +640,77 @@ export class DownloadManager extends EventEmitter {
 
   /* ------------------------------ 路径规划 ------------------------------ */
 
+  /**
+   * 「这个路径现在能不能用」的判定。
+   *
+   * 三种占用来源缺一不可：
+   *  1. 其它在途任务（排队/下载中/暂停）已规划的路径 —— 磁盘上还没有文件，
+   *     但马上就会有，只看 existsSync 会漏掉这一整类冲突；
+   *  2. 磁盘上已存在的正式文件；
+   *  3. 磁盘上已存在的 .part（上次中断留下的，续传要用，不能被顶掉）。
+   */
+  private occupancy(selfId?: string): (p: string) => boolean {
+    const active = new Set<string>()
+    for (const t of this.tasks.values()) {
+      if (t.id === selfId) continue
+      if (
+        t.status === 'waiting' ||
+        t.status === 'pending' ||
+        t.status === 'downloading' ||
+        t.status === 'paused'
+      ) {
+        active.add(pathKey(t.savePath))
+      }
+    }
+    return (p: string): boolean =>
+      active.has(pathKey(p)) || existsSync(p) || existsSync(`${p}.part`)
+  }
+
+  /** 给 desired 找一个真正空闲的路径（同目录内递增序号，保留扩展名） */
+  private freePath(desired: string, selfId?: string): string {
+    const taken = this.occupancy(selfId)
+    if (!taken(desired)) return desired
+    const m = /^(.*?)(\.[^./\\]+)$/.exec(desired)
+    const stem = m ? m[1] : desired
+    const ext = m ? m[2] : ''
+    let i = 1
+    let p = `${stem} (${i})${ext}`
+    while (taken(p) && i < 500) {
+      i += 1
+      p = `${stem} (${i})${ext}`
+    }
+    return p
+  }
+
+  /** 该路径是否正被「其它在途任务」占用（不管磁盘上有没有东西） */
+  private heldByActive(p: string, selfId?: string): boolean {
+    const key = pathKey(p)
+    for (const t of this.tasks.values()) {
+      if (t.id === selfId) continue
+      if (
+        t.status === 'waiting' ||
+        t.status === 'pending' ||
+        t.status === 'downloading' ||
+        t.status === 'paused'
+      ) {
+        if (pathKey(t.savePath) === key) return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * 任务专属的临时文件路径。
+   *
+   * 带上任务 id，保证任何情况下都不会有两个任务共用同一个 .part
+   * ——共用会让并发写入互相截断，续传时还会把另一首歌的字节接在后面，成品必坏。
+   * 同时它由「当前 savePath」推导，所以音质/容器变化导致路径变化时会自然换用
+   * 新的临时文件，绝不会把上一轮的残片接着往下写。
+   */
+  private partPathOf(task: DownloadTask): string {
+    return `${task.savePath}.${task.id.slice(0, 8)}.part`
+  }
+
   /** 根据配置模板计算最终保存路径，并处理重名 */
   private planPath(
     song: Song,
@@ -557,26 +723,24 @@ export class DownloadManager extends EventEmitter {
     let fileName = `${base}.${ext}`
     let savePath = join(config.dir, fileName)
 
-    if (existsSync(savePath)) {
-      switch (config.conflict) {
-        case 'overwrite':
-          break
-        case 'skip':
-          // 已存在则沿用（上层下载会覆盖，这里给出相同路径以便统计）
-          break
-        case 'rename':
-        default: {
-          let i = 1
-          while (existsSync(savePath) && i < 500) {
-            fileName = `${base} (${i}).${ext}`
-            savePath = join(config.dir, fileName)
-            i += 1
-          }
-          break
-        }
-      }
+    const taken = this.occupancy()
+    if (!taken(savePath)) return { fileName, savePath }
+
+    // 覆盖 / 跳过只对「磁盘上已有的历史文件」有意义；被在途任务占用的路径必须让开
+    const heldByActive = [...this.tasks.values()].some(
+      (t) =>
+        pathKey(t.savePath) === pathKey(savePath) &&
+        (t.status === 'waiting' ||
+          t.status === 'pending' ||
+          t.status === 'downloading' ||
+          t.status === 'paused')
+    )
+    if (!heldByActive && (config.conflict === 'overwrite' || config.conflict === 'skip')) {
+      return { fileName, savePath }
     }
 
+    savePath = this.freePath(savePath)
+    fileName = savePath.slice(savePath.lastIndexOf(sep) + 1)
     return { fileName, savePath }
   }
 }
@@ -585,6 +749,19 @@ export class DownloadManager extends EventEmitter {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** 路径比较用键：Windows 文件系统不区分大小写，必须归一化后再比 */
+function pathKey(p: string): string {
+  const n = normalize(resolve(p))
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+/** 判断 target 是否在 dir 目录之内（用于「绝不删下载目录以外的文件」） */
+function isInsideDir(target: string, dir: string): boolean {
+  const d = pathKey(dir)
+  const t = pathKey(target)
+  return t === d || t.startsWith(d.endsWith(sep) ? d : d + sep)
 }
 
 function sleep(ms: number): Promise<void> {

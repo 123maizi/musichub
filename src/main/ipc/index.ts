@@ -359,6 +359,8 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(CH.downloadList, () => downloads.list())
 
+  ipcMain.handle(CH.downloadAudit, () => downloads.audit())
+
   ipcMain.handle(CH.downloadPause, (_e, ids: string[]) => downloads.pause(ids))
 
   ipcMain.handle(CH.downloadResume, (_e, ids: string[]) => downloads.resume(ids))

@@ -71,6 +71,24 @@ async function openTask(task: DownloadTask): Promise<void> {
 async function playTask(task: DownloadTask): Promise<void> {
   if (task.status !== 'done') return
 
+  /**
+   * 播放前先确认文件真的还在。
+   *
+   * 「任务写着已完成、点播放却没声音」绝大多数不是解码问题，而是文件已经不在
+   * 那个路径上了（被同名任务覆盖、被手动清理、被移动）。与其让音频元素报一个
+   * 笼统的失败，不如在这里就说清楚，并且直接把「重新下载」摆在眼前。
+   */
+  const audit = await api.download.audit()
+  const state = audit?.[task.id]
+  if (state && !state.exists) {
+    downloads.markMissing(task.id, true)
+    window.alert(
+      `这个文件已经不在磁盘上了：\n${task.savePath}\n\n` +
+        `多半是被同名任务覆盖、或已被移动到别处。\n点「重新下载」可以重新拿一份。`
+    )
+    return
+  }
+
   const song = localSongOf(task)
 
   /**
@@ -82,6 +100,12 @@ async function playTask(task: DownloadTask): Promise<void> {
    */
   const list = downloads.tasks.filter((t) => t.status === 'done').map(localSongOf)
   await player.play(song, list)
+}
+
+/** 文件丢失时的一键补救：按原来的歌曲信息重新入库下载 */
+async function redownload(task: DownloadTask): Promise<void> {
+  await downloads.remove([task.id], false)
+  await downloads.add([task.song], { quality: task.quality })
 }
 
 /**
@@ -190,6 +214,14 @@ function isPlayingTask(task: DownloadTask): boolean {
           </div>
 
           <div v-if="task.error" class="err-line ellipsis" :title="task.error">{{ task.error }}</div>
+
+          <div
+            v-if="task.status === 'done' && downloads.missingFiles.has(task.id)"
+            class="err-line"
+            title="任务记录说已完成，但磁盘上已经找不到这个文件"
+          >
+            文件已丢失（可能被同名任务覆盖或已移动）—— 点右侧「重新下载」拿一份新的
+          </div>
         </div>
 
         <div class="ops">
@@ -218,7 +250,15 @@ function isPlayingTask(task: DownloadTask): boolean {
             重试
           </button>
           <button
-            v-if="task.status === 'done'"
+            v-if="task.status === 'done' && downloads.missingFiles.has(task.id)"
+            class="ghost small danger"
+            title="文件已不在磁盘上，重新下载一份"
+            @click="redownload(task)"
+          >
+            重新下载
+          </button>
+          <button
+            v-if="task.status === 'done' && !downloads.missingFiles.has(task.id)"
             class="ghost small"
             :class="{ active: isPlayingTask(task) }"
             title="在应用内播放这个文件"

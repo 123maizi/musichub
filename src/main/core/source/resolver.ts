@@ -146,8 +146,16 @@ export class MusicResolver {
       return this.resolveLocal(song)
     }
 
-    // 命中缓存直接返回：重复播放、拖完进度重取、切回上一首都不必再打扰音源
-    const cached = this.readCache(song, req.quality)
+    /**
+     * 命中缓存直接返回：重复播放、拖完进度重取、切回上一首都不必再打扰音源。
+     *
+     * 但**显式指定了音源时不走缓存** —— 缓存是按「歌 + 音质」存的，
+     * 记的是「上次从哪个源拿到的」，并不区分调用方要的是哪个源。
+     * 用户明确指定某个音源（比如在音源页逐个试用），却拿到另一个源的地址，
+     * 那是彻头彻尾的错误结果。
+     */
+    const explicitSources = (req.sourceIds?.length ?? 0) > 0
+    const cached = explicitSources ? null : this.readCache(song, req.quality)
     if (cached) {
       this.deps.onLog?.('info', 'resolver', `取流命中缓存 [${song.platform}] ${song.name}`)
       return cached
@@ -170,7 +178,8 @@ export class MusicResolver {
       const hit = await this.attemptGroup(group, song, quality, attempts)
       if (hit) {
         const result = this.buildResult(hit, song, quality, attempts)
-        this.writeCache(song, req.quality, result)
+        // 显式指定音源的调用不写缓存，免得把它当成「这首歌的默认地址」缓存住
+        if (!explicitSources) this.writeCache(song, req.quality, result)
         return result
       }
     }

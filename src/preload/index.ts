@@ -8,7 +8,11 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { CH, EV } from '@shared/ipc-channels'
 import type { Lyric, LyricTranslateResult, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
 import type { AiConfig, AiTestResult, SavedTranslation } from '@shared/types/ai'
-import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
+import type {
+  DownloadAddRequest,
+  DownloadConfig,
+  DownloadFileAudit
+} from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
 
 /** 注销函数：调用后停止监听 */
@@ -112,6 +116,9 @@ const api = {
   download: {
     add: (req: DownloadAddRequest) => invoke(CH.downloadAdd, req),
     list: () => invoke(CH.downloadList),
+
+    audit: () =>
+      invoke(CH.downloadAudit) as Promise<Record<string, DownloadFileAudit>>,
     pause: (ids: string[]) => invoke(CH.downloadPause, ids),
     resume: (ids: string[]) => invoke(CH.downloadResume, ids),
     remove: (ids: string[], deleteFile = false) =>

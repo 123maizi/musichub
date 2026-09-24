@@ -15,6 +15,36 @@ export const useDownloadStore = defineStore('downloads', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
+  /**
+   * 已完成但磁盘上找不到文件的任务 id 集合。
+   *
+   * 这类任务的「已完成」是假的 —— 文件可能被同名任务覆盖过、被清理过。
+   * 不标出来的话，用户点播放只会得到一个没头没尾的失败。
+   */
+  const missingFiles = ref<Set<string>>(new Set())
+
+  async function audit(): Promise<void> {
+    try {
+      const result = await window.api.download.audit()
+      const next = new Set<string>()
+      for (const task of tasks.value) {
+        if (task.status !== 'done') continue
+        const state = result?.[task.id]
+        if (state && (!state.exists || state.suspicious)) next.add(task.id)
+      }
+      missingFiles.value = next
+    } catch {
+      /* 体检失败不影响主流程 */
+    }
+  }
+
+  function markMissing(id: string, missing: boolean): void {
+    const next = new Set(missingFiles.value)
+    if (missing) next.add(id)
+    else next.delete(id)
+    missingFiles.value = next
+  }
+
   const activeTasks = computed(() =>
     tasks.value.filter((t) => t.status === 'downloading' || t.status === 'pending' || t.status === 'waiting')
   )
@@ -34,6 +64,7 @@ export const useDownloadStore = defineStore('downloads', () => {
     try {
       tasks.value = await window.api.download.list()
       error.value = null
+      await audit()
     } catch (err) {
       error.value = cleanIpcError(err)
     } finally {
@@ -130,11 +161,14 @@ export const useDownloadStore = defineStore('downloads', () => {
     config,
     loading,
     error,
+    missingFiles,
     activeTasks,
     finishedTasks,
     failedTasks,
     overallProgress,
     refresh,
+    audit,
+    markMissing,
     loadConfig,
     setConfig,
     chooseDir,
