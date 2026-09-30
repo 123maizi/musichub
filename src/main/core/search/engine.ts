@@ -30,6 +30,27 @@ export interface SearchEngineDeps {
   onLog?: (level: 'info' | 'warn' | 'error', scope: string, message: string) => void
 }
 
+/**
+ * 平台是不是「明确拒绝了」。
+ *
+ * 国内音乐接口被限流时最典型的回应就是一个 HTML 拦截页，解析 JSON 自然失败，
+ * 报错长这样：`Unexpected token '<', "<html>..."`。这类错误必须与普通网络抖动
+ * 区别对待 —— 前者要立刻熔断，后者要容错。
+ */
+function isBlockedResponse(message: string): boolean {
+  const m = message.toLowerCase()
+  return (
+    m.includes('unexpected token') ||
+    m.includes('<html') ||
+    m.includes('<!doctype') ||
+    m.includes('is not valid json') ||
+    m.includes('invalid json') ||
+    // 中文接口有时直接回一段 HTML 提示页，解析里也会出现这个字样
+    m.includes('非 json') ||
+    m.includes('不是 json')
+  )
+}
+
 export class SearchEngine {
   private readonly deps: SearchEngineDeps
   private readonly providers: SearchProvider[]
@@ -44,6 +65,57 @@ export class SearchEngine {
   private readonly cache = new Map<string, { response: SearchResponse; expireAt: number }>()
 
   private static readonly CACHE_TTL = 90 * 1000
+
+  /**
+   * 缓存条数硬上限。
+   *
+   * 光清「已过期」的项是不够的：用户连着搜几十个不同关键词时，60 条可能全都
+   * 还没过期，size 就会一路涨上去 —— 而每条响应装着最多 5 个平台 × 50 首，
+   * 每首歌还带着平台原始字段（raw）。这样涨下去主进程内存只增不减，
+   * 表现就是「用得越久越吃内存」。
+   */
+  private static readonly CACHE_MAX = 60
+
+  /**
+   * 进行中的相同请求（缓存键 → Promise）。
+   *
+   * 这是「搜索请求风暴」的根治点。缓存只记「已完成」的结果，所以同一个 key 的
+   * 并发调用在首个请求返回之前**全部 miss**，于是每一个都真打一遍平台。
+   * 真实日志里的形态很典型：酷我的失败日志成对出现、每 300~400ms 一组 ——
+   * 同一次用户操作在短时间内叠了好几条相同搜索（搜索页 + 艺人页 + 专辑页
+   * 都会调 song search），每条都独立打向平台，平台反手给 HTML 拦截页，
+   * 之后越打越失败，日志被刷屏。
+   *
+   * 现在同一 key 的并发调用共享同一个 Promise，平台侧只看到一次请求。
+   */
+  private readonly inflightSearch = new Map<string, Promise<SearchResponse>>()
+
+  /** 艺人 / 专辑搜索的进行中请求（同样是「一次操作打多遍」的重灾区） */
+  private readonly inflightAux = new Map<string, Promise<unknown>>()
+
+  /**
+   * 平台级熔断状态：platform → 连续失败次数 / 冷却截止 / 最近原因。
+   *
+   * 拿到 HTML 拦截页时不必攒次数，直接冷却 60 秒 —— 那是平台明确在拒绝，
+   * 继续请求只会把限流打成持续失败。普通网络抖动则要连续失败 3 次才冷却，
+   * 免得一次超时就把平台关了。冷却到点自动恢复，能力一点没少。
+   */
+  private readonly platformHealth = new Map<
+    string,
+    { strikes: number; until: number; reason: string }
+  >()
+
+  private static readonly PLATFORM_COOLDOWN_MS = 60_000
+  private static readonly PLATFORM_COOLDOWN_SOFT_MS = 20_000
+  /**
+   * 触发熔断需要连续失败几次。
+   *
+   * 拦截页要 2 次：一次「Unexpected token」也可能只是偶发的网关抖动，
+   * 一次就关平台等于拿功能换安静 —— 而这是明令不许的。
+   * 普通网络错误要 3 次，容错更宽。
+   */
+  private static readonly PLATFORM_BLOCKED_STRIKES = 2
+  private static readonly PLATFORM_STRIKE_LIMIT = 3
 
   constructor(deps: SearchEngineDeps) {
     this.deps = deps
@@ -60,6 +132,95 @@ export class SearchEngine {
     this.cache.clear()
   }
 
+  /** 进程退出前释放（缓存里是整包响应，属于该主动交还的内存） */
+  dispose(): void {
+    this.cache.clear()
+    this.inflightSearch.clear()
+    this.inflightAux.clear()
+    this.platformHealth.clear()
+  }
+
+  /** 当前缓存条数（诊断/验证用） */
+  get cacheSize(): number {
+    return this.cache.size
+  }
+
+  /**
+   * 同一 key 的并发调用只真正执行一次，其余复用同一个 Promise。
+   * 执行结束后立刻从表里摘掉，不占内存、也不会让后续请求拿到过期结果。
+   */
+  private dedupe<T>(store: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> {
+    const running = store.get(key)
+    if (running) return running
+    const task = run()
+    store.set(key, task)
+    const clear = (): void => {
+      if (store.get(key) === task) store.delete(key)
+    }
+    task.then(clear, clear)
+    return task
+  }
+
+  /** 该平台是否处于冷却期；返回一句人话说明，或 null 表示可以正常请求 */
+  private cooldownReason(platform: string): string | null {
+    const state = this.platformHealth.get(platform)
+    if (!state || state.until <= Date.now()) return null
+    const left = Math.ceil((state.until - Date.now()) / 1000)
+    return `已连续失败 ${state.strikes} 次（${state.reason}），${left} 秒后自动恢复`
+  }
+
+  /** 记录一次平台成功：连续失败清零并解除冷却 */
+  private markPlatformOk(platform: string): void {
+    const state = this.platformHealth.get(platform)
+    if (!state) return
+    if (state.until > Date.now()) {
+      this.deps.onLog?.('info', 'search', `平台 ${platform} 已恢复，重新参与搜索`)
+    }
+    this.platformHealth.delete(platform)
+  }
+
+  /** 记录一次平台失败：判断是否该熔断 */
+  private markPlatformFail(platform: string, name: string, message: string): void {
+    const state = this.platformHealth.get(platform) ?? { strikes: 0, until: 0, reason: '' }
+    state.strikes += 1
+    state.reason = message.slice(0, 60)
+
+    if (isBlockedResponse(message)) {
+      // HTML 拦截页 / 解析失败：平台明确在拒绝，连续两次就冷却，别再火上浇油
+      if (state.strikes >= SearchEngine.PLATFORM_BLOCKED_STRIKES) {
+        state.until = Date.now() + SearchEngine.PLATFORM_COOLDOWN_MS
+      }
+    } else if (state.strikes >= SearchEngine.PLATFORM_STRIKE_LIMIT) {
+      state.until = Date.now() + SearchEngine.PLATFORM_COOLDOWN_SOFT_MS
+    }
+
+    this.platformHealth.set(platform, state)
+
+    if (state.until > Date.now()) {
+      this.deps.onLog?.(
+        'warn',
+        'search',
+        `${name} 暂停 ${Math.round((state.until - Date.now()) / 1000)} 秒不再请求（连续失败 ${state.strikes} 次：${state.reason}）`
+      )
+    }
+  }
+
+  /**
+   * 淘汰：先清过期项，再对超出硬上限的部分按写入顺序（= 过期顺序）淘汰最旧的。
+   * 有硬上限在，cache.size 永远不会无限增长。
+   */
+  private pruneCache(): void {
+    const now = Date.now()
+    for (const [k, v] of this.cache) {
+      if (v.expireAt <= now) this.cache.delete(k)
+    }
+    while (this.cache.size > SearchEngine.CACHE_MAX) {
+      const oldest = this.cache.keys().next().value
+      if (oldest === undefined) break
+      this.cache.delete(oldest)
+    }
+  }
+
   /* ------------------------------ 艺人搜索 ------------------------------ */
 
   /**
@@ -73,38 +234,41 @@ export class SearchEngine {
 
     const wanted = platforms && platforms.length > 0 ? new Set(platforms) : null
     const targets = Object.entries(artistSearchers).filter(([id]) => !wanted || wanted.has(id))
+    const dedupeKey = `artist|${kw}|${[...(wanted ?? [])].sort().join(',')}`
 
-    const settled: PlatformArtistResult[] = await Promise.all(
-      targets.map(async ([id, searcher]): Promise<PlatformArtistResult> => {
-        const t0 = Date.now()
-        const providerName = ARTIST_PLATFORM_NAMES[id] ?? id
-        try {
-          const artists = await searcher(kw, 1, 15)
-          return { platform: id, providerId: id, providerName, artists, cost: Date.now() - t0 }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          this.deps.onLog?.('warn', 'search', `艺人搜索失败 ${providerName}: ${message}`)
-          return {
-            platform: id,
-            providerId: id,
-            providerName,
-            artists: [],
-            cost: Date.now() - t0,
-            error: message
+    return this.dedupe(this.inflightAux, dedupeKey, async () => {
+      const settled: PlatformArtistResult[] = await Promise.all(
+        targets.map(async ([id, searcher]): Promise<PlatformArtistResult> => {
+          const t0 = Date.now()
+          const providerName = ARTIST_PLATFORM_NAMES[id] ?? id
+          try {
+            const artists = await searcher(kw, 1, 15)
+            return { platform: id, providerId: id, providerName, artists, cost: Date.now() - t0 }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            this.deps.onLog?.('warn', 'search', `艺人搜索失败 ${providerName}: ${message}`)
+            return {
+              platform: id,
+              providerId: id,
+              providerName,
+              artists: [],
+              cost: Date.now() - t0,
+              error: message
+            }
           }
-        }
-      })
-    )
+        })
+      )
 
-    // 每个平台内部排序：同名艺人很多，需要把「主流的那位」顶上来
-    for (const group of settled) {
-      group.artists = group.artists
-        .map((artist, index) => ({ artist, index, score: this.scoreArtist(artist, kw) }))
-        .sort((a, b) => b.score - a.score || a.index - b.index)
-        .map((item) => item.artist)
-    }
+      // 每个平台内部排序：同名艺人很多，需要把「主流的那位」顶上来
+      for (const group of settled) {
+        group.artists = group.artists
+          .map((artist, index) => ({ artist, index, score: this.scoreArtist(artist, kw) }))
+          .sort((a, b) => b.score - a.score || a.index - b.index)
+          .map((item) => item.artist)
+      }
 
-    return { keyword: kw, platforms: settled, cost: Date.now() - started }
+      return { keyword: kw, platforms: settled, cost: Date.now() - started }
+    }) as Promise<ArtistSearchResponse>
   }
 
   /**
@@ -146,38 +310,41 @@ export class SearchEngine {
 
     const wanted = platforms && platforms.length > 0 ? new Set(platforms) : null
     const targets = Object.entries(albumSearchers).filter(([id]) => !wanted || wanted.has(id))
+    const dedupeKey = `album|${kw}|${[...(wanted ?? [])].sort().join(',')}`
 
-    const settled: PlatformAlbumResult[] = await Promise.all(
-      targets.map(async ([id, searcher]): Promise<PlatformAlbumResult> => {
-        const t0 = Date.now()
-        const providerName = ALBUM_PLATFORM_NAMES[id] ?? id
-        try {
-          const albums = await searcher(kw, 1, 15)
-          return { platform: id, providerId: id, providerName, albums, cost: Date.now() - t0 }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          this.deps.onLog?.('warn', 'search', `专辑搜索失败 ${providerName}: ${message}`)
-          return {
-            platform: id,
-            providerId: id,
-            providerName,
-            albums: [],
-            cost: Date.now() - t0,
-            error: message
+    return this.dedupe(this.inflightAux, dedupeKey, async () => {
+      const settled: PlatformAlbumResult[] = await Promise.all(
+        targets.map(async ([id, searcher]): Promise<PlatformAlbumResult> => {
+          const t0 = Date.now()
+          const providerName = ALBUM_PLATFORM_NAMES[id] ?? id
+          try {
+            const albums = await searcher(kw, 1, 15)
+            return { platform: id, providerId: id, providerName, albums, cost: Date.now() - t0 }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            this.deps.onLog?.('warn', 'search', `专辑搜索失败 ${providerName}: ${message}`)
+            return {
+              platform: id,
+              providerId: id,
+              providerName,
+              albums: [],
+              cost: Date.now() - t0,
+              error: message
+            }
           }
-        }
-      })
-    )
+        })
+      )
 
-    // 专辑名完全匹配的排前面，其次曲目多的（通常意味着正式专辑而非单曲）
-    for (const group of settled) {
-      group.albums = group.albums
-        .map((album, index) => ({ album, index, score: this.scoreAlbum(album, kw) }))
-        .sort((a, b) => b.score - a.score || a.index - b.index)
-        .map((item) => item.album)
-    }
+      // 专辑名完全匹配的排前面，其次曲目多的（通常意味着正式专辑而非单曲）
+      for (const group of settled) {
+        group.albums = group.albums
+          .map((album, index) => ({ album, index, score: this.scoreAlbum(album, kw) }))
+          .sort((a, b) => b.score - a.score || a.index - b.index)
+          .map((item) => item.album)
+      }
 
-    return { keyword: kw, platforms: settled, cost: Date.now() - started }
+      return { keyword: kw, platforms: settled, cost: Date.now() - started }
+    }) as Promise<AlbumSearchResponse>
   }
 
   /** 专辑排序打分：同名优先，其次看曲目数 */
@@ -216,7 +383,6 @@ export class SearchEngine {
 
   /** 聚合搜索 */
   async search(req: SearchRequest): Promise<SearchResponse> {
-    const started = Date.now()
     const keyword = (req.keyword ?? '').trim()
     const page = req.page && req.page > 0 ? req.page : 1
     const limit = req.limit && req.limit > 0 ? Math.min(req.limit, 50) : 30
@@ -226,18 +392,50 @@ export class SearchEngine {
     }
 
     const channel = req.channel ?? 'builtin'
+    const key = this.cacheKey(keyword, page, channel, req.platforms)
 
     // 命中缓存直接返回，省掉五个平台的并发请求
-    const key = this.cacheKey(keyword, page, channel, req.platforms)
     const cached = this.cache.get(key)
     if (cached && Date.now() < cached.expireAt) {
       return { ...cached.response, cost: 0 }
     }
 
+    /**
+     * 进行中请求去重。
+     *
+     * 放在缓存之后、真正执行之前：第一个调用者去执行，其余调用者挂到同一个
+     * Promise 上。这样「同一次用户操作叠了好几条相同搜索」只会向平台发一次请求。
+     * 返回浅拷贝，避免多个调用者共享同一个顶层对象。
+     */
+    const running = this.inflightSearch.get(key)
+    if (running) return running.then((shared) => ({ ...shared }))
+
+    const task = this.executeSearch(keyword, page, limit, channel, req.platforms)
+    this.inflightSearch.set(key, task)
+    const clear = (): void => {
+      if (this.inflightSearch.get(key) === task) this.inflightSearch.delete(key)
+    }
+    task.then(clear, clear)
+    return task
+  }
+
+  /**
+   * 真正执行一次聚合搜索（缓存与去重之后的落点）。
+   * 从 search() 里拆出来只是为了给去重让路，逻辑与拆分前一致。
+   */
+  private async executeSearch(
+    keyword: string,
+    page: number,
+    limit: number,
+    channel: string,
+    platforms?: string[]
+  ): Promise<SearchResponse> {
+    const started = Date.now()
+
     const tasks =
       channel === 'source'
-        ? await this.sourceSearchTasks(keyword, page, limit, req.platforms)
-        : this.builtinSearchTasks(keyword, page, limit, req.platforms)
+        ? await this.sourceSearchTasks(keyword, page, limit, platforms)
+        : this.builtinSearchTasks(keyword, page, limit, platforms)
 
     const settled = await Promise.all(tasks.map((t) => this.runWithTimeout(t)))
 
@@ -255,14 +453,12 @@ export class SearchEngine {
       cost: Date.now() - started
     }
 
-    // 写入缓存（顺手把过期项清掉）
-    if (this.cache.size > 60) {
-      const now = Date.now()
-      for (const [k, v] of this.cache) {
-        if (v.expireAt <= now) this.cache.delete(k)
-      }
-    }
-    this.cache.set(key, { response, expireAt: Date.now() + SearchEngine.CACHE_TTL })
+    // 写入缓存（顺手淘汰：过期项 + 超出硬上限的最旧项）
+    this.cache.set(this.cacheKey(keyword, page, channel, platforms), {
+      response,
+      expireAt: Date.now() + SearchEngine.CACHE_TTL
+    })
+    this.pruneCache()
 
     return response
   }
@@ -318,8 +514,30 @@ export class SearchEngine {
     limit: number
   ): Promise<PlatformSearchResult> {
     const started = Date.now()
+
+    /**
+     * 平台冷却检查放在发请求之前。
+     *
+     * 被限流的平台再打也是白打 —— 既拿不到数据，还会把「偶发限流」拖成
+     * 「持续失败」。直接返回空结果 + 说明，界面照旧显示该平台，
+     * 冷却到点自动恢复，能力没有少。
+     */
+    const cooling = this.cooldownReason(provider.platform)
+    if (cooling) {
+      return {
+        platform: provider.platform,
+        providerId: provider.id,
+        providerName: provider.name,
+        songs: [],
+        isEnd: true,
+        cost: 0,
+        error: `${provider.name} 暂时跳过：${cooling}`
+      }
+    }
+
     try {
       const res: ProviderSearchResult = await provider.search(keyword, page, limit)
+      this.markPlatformOk(provider.platform)
       return {
         platform: provider.platform,
         providerId: provider.id,
@@ -331,6 +549,7 @@ export class SearchEngine {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      this.markPlatformFail(provider.platform, provider.name, message)
       this.deps.onLog?.('warn', 'search', `${provider.name} 搜索失败: ${message}`)
       return {
         platform: provider.platform,

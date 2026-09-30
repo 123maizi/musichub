@@ -6,7 +6,7 @@
  * 这类数据量级很小，整体替换比增量合并更不容易出错。
  */
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, shallowRef } from 'vue'
 
 import type { Song } from '@shared/types/music'
 import type { HistoryEntry, LibraryData, Playlist } from '@shared/types/library'
@@ -14,9 +14,17 @@ import { cleanIpcError, formatBytes } from '../utils/format'
 import { toPlain } from '../utils/ipc'
 
 export const useLibraryStore = defineStore('library', () => {
-  const favorites = ref<Song[]>([])
-  const history = ref<HistoryEntry[]>([])
-  const playlists = ref<Playlist[]>([])
+  /**
+   * 三份列表都用 shallowRef。
+   *
+   * 主进程每次变更都回传完整快照、这里整体替换（见文件头说明），
+   * 从来不原地改某个 song 的字段 —— 深层响应式在这份数据上没有任何收益，
+   * 只会给收藏 / 历史 / 歌单里的每一首歌都套一层 Proxy。
+   * 收藏与历史可以攒到几百条，这些代理开销是纯粹的白给。
+   */
+  const favorites = shallowRef<Song[]>([])
+  const history = shallowRef<HistoryEntry[]>([])
+  const playlists = shallowRef<Playlist[]>([])
 
   const loading = ref(false)
   const error = ref<string | null>(null)

@@ -166,19 +166,32 @@ export class SourceSandbox {
     return this.context?.[name] as T | undefined
   }
 
-  /** 释放：清定时器、断开 context 引用 */
+  /**
+   * 释放：清定时器、断开 context 引用。
+   *
+   * 这里必须能把脚本起过的**所有**定时器收干净 —— 漏掉一个 setInterval，
+   * 事件循环就被永久吊住：主进程退不干净、CPU 周期性唤醒、越挂越费电。
+   * 登记表的正确性由 wrapTimer 保证（见那里的注释）。
+   */
   dispose(): void {
     this.disposed = true
     for (const timer of this.timers) {
       try {
-        clearTimeout(timer)
+        // 句柄可能是 interval 也可能是 timeout，两个都清一次最省心
         clearInterval(timer)
+        clearTimeout(timer)
       } catch {
         /* ignore */
       }
     }
     this.timers.clear()
+    // 断开 context 引用，让整个 vm 上下文（含编译后的脚本与全部全局对象）可被回收
     this.context = null
+  }
+
+  /** 当前仍被登记的定时器数量（诊断用，验证 dispose 是否收干净） */
+  get pendingTimerCount(): number {
+    return this.timers.size
   }
 
   /* ------------------------------ 内部 ------------------------------ */
@@ -241,17 +254,37 @@ export class SourceSandbox {
     this.options.onLog('error', [`[sandbox] 脚本异步异常: ${describeError(err)}`])
   }
 
-  /** 包装定时器：记录句柄以便回收，并截住回调里的同步异常与 Promise 拒绝 */
+  /**
+   * 包装定时器：记录句柄以便回收，并截住回调里的同步异常与 Promise 拒绝。
+   *
+   * 关键区别（这里原先有个真 bug）：
+   *  - setTimeout  一次性，触发后句柄失效，应当从登记表摘除；
+   *  - setInterval 触发后**还在继续跑**，绝不能摘 —— 一旦摘了，dispose() 就再也
+   *    找不到这个句柄，clearInterval 无从下手，定时器永久存活并吊住事件循环。
+   *    脚本自己调 clearInterval 时仍会正常摘除（见注入的 clearInterval）。
+   */
   private wrapTimer(
     fn: typeof setTimeout | typeof setInterval,
-    _repeating: boolean
+    repeating: boolean
   ): (handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => NodeJS.Timeout {
     return (handler, timeout, ...args) => {
       const self = this
       const timer = (fn as typeof setTimeout)(
         (...cbArgs: unknown[]) => {
-          self.timers.delete(timer)
-          if (self.disposed || typeof handler !== 'function') return
+          // 一次性的摘掉；repeating 的留在表里等 dispose / 脚本自己 clear
+          if (!repeating) self.timers.delete(timer)
+          if (self.disposed || typeof handler !== 'function') {
+            // 已释放：repeating 的顺手停掉，避免泄漏的 interval 空转
+            if (repeating) {
+              self.timers.delete(timer)
+              try {
+                clearInterval(timer)
+              } catch {
+                /* ignore */
+              }
+            }
+            return
+          }
           try {
             // 显式标成 unknown：脚本回调可能返回 Promise，需要做运行时判断
             const result: unknown = handler(...cbArgs)

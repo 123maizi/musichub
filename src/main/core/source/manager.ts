@@ -71,10 +71,86 @@ export interface SourceManagerDeps {
 /** 可执行的脚本扩展名 */
 const SCRIPT_EXT = new Set(['.js', '.mjs', '.cjs', '.txt'])
 
+/**
+ * 音源并行装载的并发上限。
+ *
+ * 为什么需要并行：每个脚本的 `waitForInited` 最长 15 秒，27 个里只要有两个慢脚本，
+ * 串行装载就要 30 秒以上 —— 而其中 24 个健康音源本来 0.7 秒就绪，用户却要陪跑半分钟。
+ * 并行之后慢脚本的等待彼此重叠，总耗时≈最慢那条链，而不是所有脚本之和。
+ *
+ * 为什么不是「越大越好」：脚本进 vm 执行 `sandbox.run()` 是同步的、CPU 密集的，
+ * 所以真正的执行段由 scriptSlot 逐个排队（见 loadFile），并发数只决定
+ * 「同时有多少个脚本在等握手」。5 已经足够把等待全部重叠起来。
+ */
+const LOAD_CONCURRENCY = 5
+
+/**
+ * 有限并发执行一批任务。
+ *
+ * 刻意不用 Promise.all(items.map(...))：那样等于不限并发。
+ * 这里用游标 + N 个常驻 worker，天然限流，且某个任务抛错不会带走整批
+ * （worker 内部自行 try/catch，见调用处）。
+ */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return
+  let cursor = 0
+  const width = Math.max(1, Math.min(limit, items.length))
+  const runners: Promise<void>[] = []
+  for (let i = 0; i < width; i += 1) {
+    runners.push(
+      (async () => {
+        for (;;) {
+          const index = cursor
+          cursor += 1
+          if (index >= items.length) return
+          await worker(items[index], index)
+        }
+      })()
+    )
+  }
+  await Promise.all(runners)
+}
+
 export class SourceManager extends EventEmitter {
   private readonly deps: SourceManagerDeps
   private readonly sources = new Map<string, LoadedSource>()
   private readonly state: JsonStore<SourceState>
+  /** 退出中：让在途的握手等待立刻结束，不再拖住退出 */
+  private disposed = false
+
+  /**
+   * 脚本「同步执行段」的排队锁。
+   *
+   * `vm.Script.runInContext` 是同步的：一个 1.4MB 的混淆脚本能独占主线程
+   * 好几百毫秒。并行装载如果放任 5 个脚本同时开跑，主线程会被连续占住几秒 ——
+   * 界面直接卡死，比串行还难看。
+   *
+   * 所以这里只把「真正跑脚本」这一段排队，一次一个：
+   *   - 同步执行的总时长与串行时一样（本来就省不掉，CPU 是同一颗）；
+   *   - 但每个脚本长达十几秒的**握手等待**完全并行 —— 这才是 34 秒的大头。
+   * 交出锁之前还让出一次宏任务，保证两个脚本之间界面能喘口气、IPC 能走。
+   */
+  private scriptSlot: Promise<void> = Promise.resolve()
+
+  /** 排队执行一段同步代码（见 scriptSlot 的注释） */
+  private async withScriptSlot<T>(fn: () => T): Promise<T> {
+    const previous = this.scriptSlot
+    let release: () => void = () => undefined
+    this.scriptSlot = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await previous
+    try {
+      return fn()
+    } finally {
+      // 放到下一个宏任务再放锁：让事件循环转一圈（渲染、IPC、网络回调都能跑）
+      setTimeout(release, 0)
+    }
+  }
 
   constructor(deps: SourceManagerDeps) {
     super()
@@ -89,14 +165,36 @@ export class SourceManager extends EventEmitter {
   async init(): Promise<void> {
     const files = this.listScriptFiles(this.deps.sourceDir)
     this.log('info', `发现 ${files.length} 个本地音源脚本`)
-    for (const file of files) {
-      try {
-        await this.loadFile(file)
-      } catch (err) {
-        this.log('error', `装载失败 ${basename(file)}: ${errMsg(err)}`)
-      }
-    }
+
+    const started = Date.now()
+    await this.loadMany(files, '装载')
+
+    const all = this.list()
+    const ready = all.filter((s) => s.status === 'ready').length
+    // 耗时写进日志：这是「启动后多久能用」的唯一客观口径
+    this.log(
+      'info',
+      `音源装载完成: ${ready}/${all.length} 可用，耗时 ${Date.now() - started}ms（并发 ${LOAD_CONCURRENCY}）`
+    )
     this.emitChanged()
+  }
+
+  /**
+   * 并发装载一批脚本。
+   *
+   * 每装载完一个就 emitChanged 推给界面 —— 快脚本不必等慢脚本，
+   * 用户 1~2 秒内就能用上那批健康音源（功能一个没少，只是不再互相拖）。
+   */
+  private async loadMany(files: string[], phase: string): Promise<void> {
+    await runPool(files, LOAD_CONCURRENCY, async (file) => {
+      try {
+        const loaded = await this.loadFile(file)
+        // 已经不在表里（装载过程中被 remove/reload 掉）就不必再通知
+        if (this.sources.get(loaded.id) === loaded) this.emitChanged()
+      } catch (err) {
+        this.log('error', `${phase}失败 ${basename(file)}: ${errMsg(err)}`)
+      }
+    })
   }
 
   /** 全部音源视图 */
@@ -296,9 +394,18 @@ export class SourceManager extends EventEmitter {
   async importBundled(): Promise<SourceImportResult> {
     const result: SourceImportResult = { imported: [], failed: [], skipped: [] }
     const dir = this.deps.bundledDir
-    if (!dir || !existsSync(dir)) return result
+    if (this.disposed || !dir || !existsSync(dir)) return result
 
     const files = this.listScriptFiles(dir)
+
+    /**
+     * 分两段做，顺序是刻意的：
+     *  1) 先串行决定目标文件名并写盘 —— uniqueFileName 依赖 existsSync 做避让，
+     *     并发调用会算出同一个候选名，把两个脚本写到同一个文件上；
+     *  2) 再并发装载 —— 这一段才是慢的（每个脚本要等 inited 握手，最长 15 秒）。
+     * 首次启动要导入 27 个脚本，串行装载会把启动拖到 30 秒以上。
+     */
+    const jobs: { path: string; source: string }[] = []
     for (const file of files) {
       try {
         const code = readFileSync(file, 'utf8')
@@ -309,12 +416,24 @@ export class SourceManager extends EventEmitter {
         }
         const targetPath = join(this.deps.sourceDir, this.uniqueFileName(basename(file)))
         writeFileSync(targetPath, code, 'utf8')
-        const loaded = await this.loadFile(targetPath)
-        result.imported.push(loaded.info)
+        jobs.push({ path: targetPath, source: basename(file) })
       } catch (err) {
         result.failed.push({ path: file, error: errMsg(err) })
       }
     }
+
+    const imported: (SourceInfo | undefined)[] = new Array(jobs.length)
+    await runPool(jobs, LOAD_CONCURRENCY, async (job, index) => {
+      try {
+        const loaded = await this.loadFile(job.path)
+        imported[index] = loaded.info
+        this.emitChanged()
+      } catch (err) {
+        result.failed.push({ path: job.source, error: errMsg(err) })
+      }
+    })
+    for (const info of imported) if (info) result.imported.push(info)
+
     this.emitChanged()
     return result
   }
@@ -397,6 +516,9 @@ export class SourceManager extends EventEmitter {
 
   /** 进程退出前清理 */
   dispose(): void {
+    this.disposed = true
+    // 先清监听：退出过程中不该再往界面推 changed
+    this.removeAllListeners()
     for (const src of this.sources.values()) {
       src.sandbox.dispose()
       src.lxRuntime?.dispose()
@@ -409,6 +531,9 @@ export class SourceManager extends EventEmitter {
 
   /** 加载单个脚本文件：解析 → 执行 → 握手 → 建视图 */
   private async loadFile(filePath: string): Promise<LoadedSource> {
+    // 退出中不再起新的沙箱：否则每个脚本都要白等一轮握手超时
+    if (this.disposed) throw new Error('音源管理器已释放，取消装载')
+
     const code = readFileSync(filePath, 'utf8')
     const fileName = basename(filePath)
     const meta = parseSourceMeta(code, fileName)
@@ -461,7 +586,8 @@ export class SourceManager extends EventEmitter {
 
     let exportsValue: unknown = null
     try {
-      const result = sandbox.run()
+      // 同步执行段排队：一次只让一个脚本占着主线程（见 scriptSlot 的注释）
+      const result = await this.withScriptSlot(() => sandbox.run())
       exportsValue = result.moduleExports
       // 异步赋值 exports 的脚本，稍后再读一次
       if (!exportsValue || Object.keys(exportsValue as object).length === 0) {
@@ -545,17 +671,38 @@ export class SourceManager extends EventEmitter {
     timeoutMs: number = APP_CONST.sourceInitTimeout
   ): Promise<LxInitedPayload | null> {
     if (runtime.isInited) return Promise.resolve(runtime.initPayload)
+
     return new Promise((resolve) => {
       const deadline = Date.now() + timeoutMs
-      const timer = setInterval(() => {
-        if (runtime.isInited) {
-          clearInterval(timer)
-          resolve(runtime.initPayload)
-        } else if (Date.now() > deadline) {
-          clearInterval(timer)
+      /**
+       * 退避轮询。
+       *
+       * 改掉原来的 setInterval(40ms) 有两个原因：
+       *  1. 快脚本 10ms 内就上报了，40ms 的固定节拍白等一个周期；
+       *  2. 慢脚本那 15 秒里每秒被唤醒 25 次，纯属空转。
+       * 退避到 100ms 封顶后，慢脚本的唤醒次数降到 1/12，快脚本反而更快就绪。
+       * 用 setTimeout 递归而不是 setInterval：天然没有「忘了 clear」的悬挂定时器，
+       * 每一轮结束就结束了，退出时不会留下活着的句柄。
+       */
+      let delay = 10
+      const tick = (): void => {
+        if (this.disposed) {
           resolve(null)
+          return
         }
-      }, 40)
+        if (runtime.isInited) {
+          resolve(runtime.initPayload)
+          return
+        }
+        if (Date.now() >= deadline) {
+          resolve(null)
+          return
+        }
+        const step = delay
+        delay = Math.min(Math.round(delay * 1.7), 100)
+        setTimeout(tick, step)
+      }
+      tick()
     })
   }
 

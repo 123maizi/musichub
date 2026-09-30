@@ -39,19 +39,71 @@ const HOST_VERSION_FOR_SOURCES = '2.7.0'
 
 type LogLevel = 'info' | 'warn' | 'error'
 
-/** 统一日志出口：控制台 + 文件 */
-function createLogger(logFile: string) {
-  return (level: LogLevel, scope: string, message: string): void => {
-    const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] [${scope}] ${message}`
-    if (level === 'error') console.error(line)
-    else if (level === 'warn') console.warn(line)
-    else console.log(line)
+/** 带 flush 的日志出口：退出前必须把缓冲写下去 */
+interface AppLogger {
+  (level: LogLevel, scope: string, message: string): void
+  /** 立刻把缓冲落盘 */
+  flush(): void
+}
+
+/**
+ * 退出路径上要用的日志 flush（logFatal 走的是另一条路，但也想保序）。
+ * 放在模块级是为了让 logFatal 在 bootstrap 之外也能拿到。
+ */
+let flushLogFile: (() => void) | null = null
+
+/**
+ * 统一日志出口：控制台 + 文件。
+ *
+ * 文件写入改成「攒一批再一次 appendFileSync」，而不是每行一次：
+ * appendFileSync 是同步阻塞主线程的，音源装载阶段一次能刷出几十行日志，
+ * 逐行写等于把主线程按在磁盘上几十次。改成 250ms 合并写之后，
+ * 日志能力一点没少（同一份文件、同样的行、同样的格式），同步写盘次数
+ * 从「每行一次」降到「每批一次」。
+ */
+function createLogger(logFile: string): AppLogger {
+  let pending: string[] = []
+  let timer: NodeJS.Timeout | null = null
+
+  const writeNow = (): void => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (pending.length === 0) return
+    const chunk = pending.join('')
+    pending = []
     try {
-      appendFileSync(logFile, `${line}\n`, 'utf8')
+      appendFileSync(logFile, chunk, 'utf8')
     } catch {
       /* 日志写不进去不能影响主流程 */
     }
   }
+
+  const schedule = (): void => {
+    if (timer) return
+    timer = setTimeout(() => {
+      timer = null
+      writeNow()
+    }, 250)
+    // 纯写盘任务，不该吊住事件循环：退出时 flush() 会保证不丢
+    timer.unref?.()
+  }
+
+  const logger = ((level: LogLevel, scope: string, message: string): void => {
+    const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] [${scope}] ${message}`
+    if (level === 'error') console.error(line)
+    else if (level === 'warn') console.warn(line)
+    else console.log(line)
+
+    pending.push(`${line}\n`)
+    // 攒够一批就立刻写，避免长时间挂着一大块内存；否则等防抖
+    if (pending.length >= 64) writeNow()
+    else schedule()
+  }) as AppLogger
+
+  logger.flush = writeNow
+  return logger
 }
 
 /**
@@ -94,8 +146,12 @@ async function importBundledIfNeeded(
 async function bootstrap(): Promise<void> {
   const userData = app.getPath('userData')
   const log = createLogger(join(userData, 'musichub.log'))
+  flushLogFile = () => log.flush()
 
   log('info', 'app', `MusicHub 启动  electron=${process.versions.electron} node=${process.versions.node}`)
+
+  /** 退出中：所有后台任务看到它就收敛，不再起新活 */
+  let shuttingDown = false
 
   /* --------------------------- 1. 本地流代理 --------------------------- */
   const proxy = new StreamProxy()
@@ -185,11 +241,15 @@ async function bootstrap(): Promise<void> {
     /**
      * 下载记录要落盘。
      * 之前只存在内存里，重启后列表就是空的 —— 用户下过的歌看不到也播不了。
+     *
+     * pretty: false —— 这份文件是纯机器数据（任务 + 完整歌曲对象，可能上百 KB），
+     * 缩进换行只为好看却让体积和 stringify 开销都翻倍；用户不会去读它。
+     * 落盘格式仍旧是标准 JSON，读写逻辑完全不变。
      */
     historyStore: new JsonStore<{ tasks: DownloadTask[] }>(
       join(userData, 'download-tasks.json'),
       { tasks: [] },
-      { debounceMs: 400 }
+      { debounceMs: 400, pretty: false }
     ),
     onLog: log
   })
@@ -212,7 +272,7 @@ async function bootstrap(): Promise<void> {
   const library = new LibraryService(join(userData, 'library.json'))
 
   /* --------------------------- 4. IPC --------------------------- */
-  registerIpc({
+  const disposeIpc = registerIpc({
     sources,
     search,
     resolver,
@@ -234,17 +294,68 @@ async function bootstrap(): Promise<void> {
   // 装载进度由 SourceManager 的 changed 事件自动推送到界面，无需在此手动通知
   void (async () => {
     await sources.init()
+    // 退出中就别再导入内置音源了：每个脚本都要白等一轮握手超时
+    if (shuttingDown) return
     await importBundledIfNeeded(sources, join(userData, '.bundled-imported'), log)
+    if (shuttingDown) return
     const ready = sources.list().filter((s) => s.status === 'ready')
     log('info', 'app', `音源装载完成: ${ready.length}/${sources.list().length} 可用`)
   })()
 
   /* --------------------------- 退出清理 --------------------------- */
-  app.on('before-quit', () => {
-    downloads.dispose()
-    sources.dispose()
-    library.dispose()
-    void proxy.stop()
+  /**
+   * 退出顺序（每一步都有理由）：
+   *  1. 先摘 IPC 转发 —— 窗口正在销毁，此刻继续广播只会撞上已销毁的 webContents
+   *  2. 再停服务 —— 下载 abort（关掉 .part 写句柄）、音源沙箱 dispose
+   *     （这一步才是「清掉第三方脚本 setInterval」的地方）、歌单/译文/任务落盘
+   *  3. 最后**等**代理真正关闭 —— proxy.stop() 是异步的。原来 `void proxy.stop()`
+   *     没人等它，进程可能在 HTTP server 关掉之前就退了，端口与句柄只能留给
+   *     系统回收；现在换成 before-quit + preventDefault + 清理完成后 app.exit()。
+   *
+   * 全程 1200ms 硬超时兜底：清理再慢也绝不卡住退出。
+   */
+  let shutdownStarted = false
+  app.on('before-quit', (event) => {
+    // 清理没走完之前，任何一次 quit 都要拦下来 —— 否则第二次 quit
+    // （用户连点两次关闭、或系统会话结束）会绕开清理直接退出。
+    // 注意 app.exit() 不会再触发 before-quit，所以这里不必担心死循环。
+    if (shutdownStarted) {
+      event.preventDefault()
+      return
+    }
+    shutdownStarted = true
+    shuttingDown = true
+    event.preventDefault()
+
+    const steps: Promise<unknown>[] = []
+    try {
+      disposeIpc()
+      downloads.dispose()
+      sources.dispose()
+      library.dispose()
+      // 这两个 store 原先定义了 flush 却没人调用：刚保存的译文 / 刚改的 AI 配置
+      // 若正好落在 300ms 防抖窗口内退出就会丢，现在补上
+      aiStore.flush()
+      savedTranslations.flush()
+      search.dispose()
+      steps.push(proxy.stop())
+      log('info', 'app', '退出清理已发起')
+    } catch (err) {
+      log('warn', 'app', `退出清理异常: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    log.flush()
+
+    let guard: NodeJS.Timeout | null = null
+    const timeout = new Promise<void>((resolve) => {
+      guard = setTimeout(resolve, 1200)
+    })
+    void Promise.race([Promise.allSettled(steps), timeout]).finally(() => {
+      if (guard) clearTimeout(guard)
+      log('info', 'app', '退出清理完成，进程退出')
+      log.flush()
+      // 用 exit 而不是 quit：quit 会再次触发 before-quit，绕回本函数
+      app.exit(0)
+    })
   })
 }
 
@@ -295,6 +406,12 @@ function logFatal(kind: string, err: unknown): void {
       ? String((err as { message: unknown }).message)
       : String(err)
   const line = `[${new Date().toISOString()}] [FATAL] [${kind}] ${message}\n`
+  try {
+    // 先把缓冲里的日志写下去，保证崩溃现场在文件里的顺序是对的
+    flushLogFile?.()
+  } catch {
+    /* 缓冲写失败不影响下面这条 */
+  }
   try {
     appendFileSync(join(app.getPath('userData'), 'musichub.log'), line, 'utf8')
   } catch {

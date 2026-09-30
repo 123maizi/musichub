@@ -10,6 +10,7 @@ import { useRouter } from 'vue-router'
 
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
 import AppIcon from '../components/AppIcon.vue'
+import PlaylistMenu from '../components/PlaylistMenu.vue'
 import { useArtistStore } from '../stores/artist'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
@@ -263,6 +264,21 @@ function queueCurrent(): void {
   }
 }
 
+/* ------------------------------ 加入歌单 ------------------------------ */
+
+const menuOpen = ref(false)
+const menuAnchor = ref<HTMLElement | null>(null)
+
+function openPlaylistMenu(event: MouseEvent): void {
+  if (!player.current) return
+  menuAnchor.value = event.currentTarget as HTMLElement
+  menuOpen.value = true
+}
+
+function onAddedToPlaylist(playlist: string, count: number): void {
+  notify(`已加入《${playlist}》${count > 1 ? ` ${count} 首` : ''}`)
+}
+
 /* ------------------------------ 下载封面 ------------------------------ */
 
 const savingCover = ref(false)
@@ -352,6 +368,10 @@ async function saveCover(): Promise<void> {
           <button class="tool" :disabled="!player.current" @click="queueCurrent">
             <AppIcon name="plus" :size="15" />
             <span>队列</span>
+          </button>
+          <button class="tool" :disabled="!player.current" title="把这首歌加入歌单" @click="openPlaylistMenu">
+            <AppIcon name="playlist" :size="15" />
+            <span>歌单</span>
           </button>
           <button
             class="tool"
@@ -509,6 +529,15 @@ async function saveCover(): Promise<void> {
     <Transition name="fade">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
+
+    <!-- 加入歌单：面板自己挂到 body 上，位置跟着刚点的那个按钮 -->
+    <PlaylistMenu
+      v-if="menuOpen && player.current"
+      :songs="[player.current]"
+      :anchor="menuAnchor"
+      @close="menuOpen = false"
+      @added="onAddedToPlaylist"
+    />
   </section>
 </template>
 

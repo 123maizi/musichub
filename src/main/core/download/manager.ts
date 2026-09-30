@@ -65,6 +65,15 @@ export class DownloadManager extends EventEmitter {
   private running = 0
   private disposed = false
 
+  /**
+   * 重试等待中的定时器（句柄 → 用来立刻唤醒的回调）。
+   *
+   * 为什么要登记：重试等待是一段 0.8~2.4 秒的 sleep，退出时如果不叫醒它，
+   * 主进程就得多挂着一个 pending 定时器；清了却不 resolve 又会让 execute()
+   * 永久停在 await 上（留下一个永远不会结束的异步帧）。两个都要处理。
+   */
+  private readonly retryTimers = new Map<NodeJS.Timeout, () => void>()
+
   constructor(deps: DownloadManagerDeps) {
     super()
     this.deps = deps
@@ -319,13 +328,30 @@ export class DownloadManager extends EventEmitter {
 
   dispose(): void {
     this.disposed = true
+    // 1) 中止所有在途下载：AbortController 会打断 fetch 的响应体读取，
+    //    streamToFile 的 finally 随即关闭 .part 写句柄，不会留下半个文件句柄
     for (const controller of this.controllers.values()) controller.abort()
     this.controllers.clear()
     this.queue.length = 0
-    this.deps.configStore.flush()
-    // 退出前把任务列表落盘，否则重启后下载记录又没了
+
+    // 2) 叫醒所有重试等待，别让退出流程挂在一个 sleep 上
+    for (const [timer, wake] of this.retryTimers) {
+      clearTimeout(timer)
+      try {
+        wake()
+      } catch {
+        /* 唤醒失败不影响退出 */
+      }
+    }
+    this.retryTimers.clear()
+
+    // 3) 摘掉事件监听，退出过程中不再往已销毁的窗口广播
+    this.removeAllListeners()
+
+    // 4) 落盘：配置 + 任务列表，并清掉防抖定时器
+    this.deps.configStore.dispose()
     this.persistTasks()
-    this.deps.historyStore?.flush()
+    this.deps.historyStore?.dispose()
   }
 
   /* ------------------------------ 调度 ------------------------------ */
@@ -400,9 +426,22 @@ export class DownloadManager extends EventEmitter {
         }
 
         this.deps.onLog?.('warn', 'download', `${task.fileName} 第 ${attempt} 次失败，重试中: ${message}`)
-        await sleep(800 * attempt)
+        await this.waitRetry(800 * attempt)
+        // 等待期间被 dispose / 暂停，就别再往下走了
+        if (this.disposed) return
       }
     }
+  }
+
+  /** 可被 dispose 立刻打断的等待（见 retryTimers 的注释） */
+  private waitRetry(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.retryTimers.delete(timer)
+        resolve()
+      }, ms)
+      this.retryTimers.set(timer, resolve)
+    })
   }
 
   /** 单次下载尝试 */
@@ -788,10 +827,6 @@ function isInsideDir(target: string, dir: string): boolean {
   const d = pathKey(dir)
   const t = pathKey(target)
   return t === d || t.startsWith(d.endsWith(sep) ? d : d + sep)
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** 渲染文件名模板，并清理非法字符 */

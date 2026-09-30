@@ -31,6 +31,27 @@ export function createWindow(): BrowserWindow {
   })
 
   /**
+   * 兜底显示。
+   *
+   * 窗口是 show:false 建的，只在 ready-to-show 时显示。可一旦渲染层加载失败
+   * （CSP、资源 404、preload 抛错），ready-to-show 可能永远不来 ——
+   * 结果是「一个进程活着、界面却永远不出现」的隐形窗口，用户只能去任务管理器杀。
+   * 这里给 8 秒兜底：到点无论如何把窗口显示出来，至少让用户看见发生了什么。
+   */
+  const showFallback = setTimeout(() => {
+    if (!win.isDestroyed() && !win.isVisible()) {
+      console.warn('[window] ready-to-show 超时，强制显示窗口')
+      win.show()
+    }
+  }, 8000)
+  // 只是兜底，不该吊住事件循环
+  showFallback.unref?.()
+
+  const clearShowFallback = (): void => clearTimeout(showFallback)
+  win.once('ready-to-show', clearShowFallback)
+  win.once('closed', clearShowFallback)
+
+  /**
    * 把渲染层的 console 与加载失败转发到主进程日志。
    * 渲染层出问题时（CSP 拦截、脚本报错、资源 404）这是唯一能看到原因的地方。
    */
@@ -42,6 +63,8 @@ export function createWindow(): BrowserWindow {
 
   win.webContents.on('did-fail-load', (_event, code, description, url) => {
     console.error(`[renderer] 加载失败 code=${code} ${description} url=${url}`)
+    // 加载失败时 ready-to-show 不会来：必须马上显示，否则就是个隐形窗口
+    if (!win.isDestroyed() && !win.isVisible()) win.show()
   })
 
   win.webContents.on('render-process-gone', (_event, details) => {

@@ -6,6 +6,7 @@
 import { computed, ref } from 'vue'
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
 import AppIcon from './AppIcon.vue'
+import PlaylistMenu from './PlaylistMenu.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
@@ -66,6 +67,17 @@ async function downloadCurrent(): Promise<void> {
   const song = player.current
   if (!song) return
   await downloads.add([song], { quality: player.quality })
+}
+
+/* ------------------------------ 加入歌单 ------------------------------ */
+
+const menuOpen = ref(false)
+const menuAnchor = ref<HTMLElement | null>(null)
+
+function openPlaylistMenu(event: MouseEvent): void {
+  if (!player.current) return
+  menuAnchor.value = event.currentTarget as HTMLElement
+  menuOpen.value = true
 }
 </script>
 
@@ -191,6 +203,15 @@ async function downloadCurrent(): Promise<void> {
           <AppIcon :name="isCurrentFavorite ? 'heart-filled' : 'heart'" :size="16" :filled="isCurrentFavorite" />
         </button>
 
+        <button
+          class="icon-btn"
+          :disabled="!player.current"
+          title="把当前歌曲加入歌单"
+          @click="openPlaylistMenu"
+        >
+          <AppIcon name="playlist" :size="16" />
+        </button>
+
         <button class="icon-btn" :disabled="!player.current" title="下载当前歌曲" @click="downloadCurrent">
           <AppIcon name="download" :size="16" />
         </button>
@@ -212,6 +233,14 @@ async function downloadCurrent(): Promise<void> {
       <span class="ellipsis">{{ player.error }}</span>
       <button class="ghost small" @click="player.error = null">知道了</button>
     </div>
+
+    <!-- 加入歌单：面板挂在 body 上，位置跟着上面那个按钮 -->
+    <PlaylistMenu
+      v-if="menuOpen && player.current"
+      :songs="[player.current]"
+      :anchor="menuAnchor"
+      @close="menuOpen = false"
+    />
   </footer>
 </template>
 

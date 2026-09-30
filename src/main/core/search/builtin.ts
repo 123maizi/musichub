@@ -83,11 +83,37 @@ function cleanText(input: string): string {
 }
 
 /**
+ * 平台返回了网页而不是数据时的统一出口。
+ *
+ * 各平台被限流、触发风控或需要验证时，不会返回错误码，而是把接口请求
+ * 重定向到一个 HTML 页面（200 + text/html）。这时候有两种坏结果：
+ *   1. 交给 JSON.parse → 抛出 "Unexpected token '<', "<html>..."，
+ *      既帮不到用户，排障时也得靠猜这是哪个平台、为什么；
+ *   2. 交给 asObj() → 静默返回空对象 → 界面上表现成「这个平台搜不到歌」，
+ *      连错误都不报，用户会以为是自己的关键词不对。
+ * 两种都不可接受。这里把这种形态识别出来，给一句人能看懂、也带平台名的话。
+ */
+function assertNotHtml(text: string, platform: string): void {
+  const head = text.slice(0, 300).trimStart().toLowerCase()
+  if (
+    head.startsWith('<!doctype') ||
+    head.startsWith('<html') ||
+    head.startsWith('<head') ||
+    head.startsWith('<?xml')
+  ) {
+    throw new Error(
+      `${platform} 返回了网页而不是数据（多半是请求过于频繁被限流或需要验证），请稍后再试`
+    )
+  }
+}
+
+/**
  * 宽松 JSON 解析。
  * 酷我的 r.s 接口返回的是 JS 对象字面量（key/值都用单引号），不是合法 JSON，
  * 直接 JSON.parse 必然失败 —— 这是该接口最容易踩的坑。
  */
-function parseLooseJson(text: string): Json {
+function parseLooseJson(text: string, platform = '平台'): Json {
+  assertNotHtml(text, platform)
   let out = ''
   let i = 0
   let inString = false
@@ -144,6 +170,25 @@ function parseLooseJson(text: string): Json {
 
   // 容忍尾随逗号
   return JSON.parse(out.replace(/,\s*([}\]])/g, '$1')) as Json
+}
+
+/**
+ * 把响应体当成 JSON 对象取出来。
+ *
+ * 与裸 asObj(res.body) 的区别：响应是字符串时先确认它不是网页。
+ * 不然平台被限流返回 HTML 时，这里会静默给出空对象，
+ * 界面上就是「这个平台搜不到歌」，连错误都没有 —— 排查时最难查的一种。
+ */
+function jsonBody(res: { body: unknown }, platform: string): Json {
+  if (res.body && typeof res.body === 'object') return res.body as Json
+  const text = String(res.body ?? '')
+  assertNotHtml(text, platform)
+  if (!text.trim()) return {}
+  try {
+    return JSON.parse(text) as Json
+  } catch {
+    return {}
+  }
 }
 
 /**
@@ -241,7 +286,7 @@ const kuwoProvider: SearchProvider = {
     const body: Json =
       res.body && typeof res.body === 'object'
         ? (res.body as Json)
-        : parseLooseJson(String(res.body ?? ''))
+        : parseLooseJson(String(res.body ?? ''), '酷我音乐')
     const list = asArr(body.abslist)
 
     const songs = list.map((item) => {
@@ -322,7 +367,7 @@ const kugouProvider: SearchProvider = {
       method: 'GET',
       headers: { 'User-Agent': DEFAULT_UA }
     })
-    const body = asObj(res.body)
+    const body = jsonBody(res, '酷狗音乐')
     const data = asObj(body.data)
     const list = asArr(data.info)
 
@@ -393,7 +438,10 @@ const qqProvider: SearchProvider = {
       }
     })
 
-    // QQ 接口有时返回 JSONP 包裹，这里做一次剥离
+    // QQ 接口有时返回 JSONP 包裹，这里做一次剥离。
+    // 先确认拿到的不是网页：被限流时返回 HTML，JSONP 正则匹配不上，
+    // 后面的 asObj 会静默给出空结果，用户看到的是「QQ 音乐搜不到歌」。
+    assertNotHtml(typeof res.body === 'string' ? res.body : '', 'QQ音乐')
     const body = unwrapJsonp(res.body)
     const data = asObj(asObj(body).data)
     const songNode = asObj(data.song)
@@ -508,7 +556,7 @@ const neteaseProvider: SearchProvider = {
       }
     })
 
-    const body = asObj(res.body)
+    const body = jsonBody(res, '网易云音乐')
     const result = asObj(body.result)
     const list = asArr(result.songs)
 
@@ -579,7 +627,7 @@ const miguProvider: SearchProvider = {
       }
     })
 
-    const body = asObj(res.body)
+    const body = jsonBody(res, '咪咕音乐')
     const data = asObj(body.songResultData)
     const list = normalizeToArray(data.resultList)
 

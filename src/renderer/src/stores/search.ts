@@ -2,7 +2,7 @@
  * 搜索状态
  */
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, shallowRef } from 'vue'
 import type { PlatformSearchResult, SearchChannel, Song } from '@shared/types/music'
 import { PLATFORM_META } from '@shared/constants'
 import { cleanIpcError } from '../utils/format'
@@ -13,20 +13,45 @@ export const useSearchStore = defineStore('search', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
-  const platforms = ref<PlatformSearchResult[]>([])
+  /**
+   * 各平台返回的原始结果。
+   *
+   * 用 shallowRef 而非 ref：一次搜索会有 140 首歌、每首十来个字段，
+   * 深层响应式会给每个 song 对象都套一层 Proxy，模板里每读一次 song.name
+   * 都要过一次代理陷阱（140 行 × 十几处读取）。而这批数据从 IPC 拿回来之后
+   * 只被整体替换、从不原地修改，浅层引用完全够用 ——
+   * 响应性一点没少（赋值照样触发），代理开销全省掉。
+   */
+  const platforms = shallowRef<PlatformSearchResult[]>([])
   const cost = ref(0)
   const page = ref(1)
   const channel = ref<SearchChannel>('builtin')
   /** 当前查看的平台分组；all 表示合并展示 */
   const activePlatform = ref<string>('all')
 
+  /**
+   * 归一化结果缓存。
+   *
+   * 同一首歌要归一化两次（合并去重一次、打分排序一次），正则替换并不便宜。
+   * 缓存之后第二遍直接命中；超过上限整体清空，不会无限涨。
+   */
+  const normalizeCache = new Map<string, string>()
+  const NORMALIZE_CACHE_LIMIT = 4000
+
   /** 归一化歌名/歌手：剥掉括号后缀，用于跨平台识别「同一首歌」 */
   function normalize(text: string): string {
-    return text
+    const cached = normalizeCache.get(text)
+    if (cached !== undefined) return cached
+
+    const result = text
       .replace(/[（(【[].*?[）)】\]]/g, '')
       .replace(/[\s·、,，/]+/g, '')
       .toLowerCase()
       .trim()
+
+    if (normalizeCache.size >= NORMALIZE_CACHE_LIMIT) normalizeCache.clear()
+    normalizeCache.set(text, result)
+    return result
   }
 
   /** 改版特征词，与主进程排序规则保持一致 */
@@ -36,6 +61,15 @@ export const useSearchStore = defineStore('search', () => {
     '铃声', '片段', '加速', '慢速', '女声', '男声', '童声', '方言',
     '串烧', 'medley', 'mashup', '电音', '合唱版', '完整版'
   ]
+
+  /**
+   * 特征词命中检测。
+   *
+   * 原来是 `VARIANT_WORDS.some(w => name.includes(w))` —— 每首歌要跑 30 次
+   * 子串查找，140 首就是 4000+ 次。合成一个正则只扫一遍字符串，语义完全一致
+   * （歌名已经 toLowerCase，词表本身也是小写，无需 i 标志）。
+   */
+  const VARIANT_RE = new RegExp(VARIANT_WORDS.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'))
 
   /**
    * 合并后的全部结果（跨平台去重靠 id）
@@ -74,7 +108,7 @@ export const useSearchStore = defineStore('search', () => {
       else if (name.startsWith(kw)) score += 70
       else if (name.includes(kw)) score += 30
 
-      if (VARIANT_WORDS.some((w) => name.includes(w))) score -= 80
+      if (VARIANT_RE.test(name)) score -= 80
       if (singer.includes(kw)) score += 60
 
       const key = `${normalize(song.name)}|${normalize(song.singer)}`

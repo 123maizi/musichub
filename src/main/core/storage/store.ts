@@ -23,6 +23,8 @@ export class JsonStore<T extends object> {
   private readonly options: Required<JsonStoreOptions>
   private timer: NodeJS.Timeout | null = null
   private readonly listeners: ((next: T) => void)[] = []
+  /** 已释放：后续写入直接落盘，不再挂防抖定时器 */
+  private disposed = false
 
   constructor(filePath: string, defaults: T, options: JsonStoreOptions = {}) {
     this.filePath = filePath
@@ -84,6 +86,29 @@ export class JsonStore<T extends object> {
     this.writeNow()
   }
 
+  /**
+   * 释放：清掉防抖定时器 + 落盘 + 摘掉所有订阅者。
+   *
+   * 为什么要单独一个方法：防抖定时器是「活的句柄」。退出流程里如果只调 flush()
+   * 而漏掉某个 store，那个 store 的定时器会一直在事件循环里挂着 ——
+   * 主进程就得等它触发完才可能退干净。
+   * 释放之后再来的 set() 改成同步落盘：数据不丢，也不会重新挂出定时器。
+   */
+  dispose(): void {
+    this.disposed = true
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    this.writeNow()
+    this.listeners.length = 0
+  }
+
+  /** 是否还有未落盘的防抖定时器（诊断用） */
+  get hasPendingWrite(): boolean {
+    return this.timer !== null
+  }
+
   /* ------------------------------ 内部 ------------------------------ */
 
   private read(): T {
@@ -101,6 +126,12 @@ export class JsonStore<T extends object> {
   }
 
   private scheduleSave(): void {
+    // 释放后不再挂定时器：直接写，保证数据不丢，也不给退出流程留活句柄
+    if (this.disposed) {
+      this.writeNow()
+      return
+    }
+    // 同一个 store 上的重复写入只保留最后一次：防抖定时器永远只有一个
     if (this.timer) clearTimeout(this.timer)
     this.timer = setTimeout(() => {
       this.timer = null

@@ -12,6 +12,7 @@
  *                改用 POST 后可用，但结果常把翻唱排在原唱前面 … 备选
  */
 import type { Lyric, Song } from '@shared/types/music'
+import { hasVariantMark } from '@shared/purity'
 import { httpRequest, DEFAULT_UA } from '../net/http'
 
 const QQ_HEADERS = {
@@ -77,26 +78,33 @@ async function fetchFromQQ(song: Song): Promise<Lyric | null> {
   const keyword = buildKeyword(song)
   if (!keyword) return null
 
-  // 第一步：搜到 songmid
+  /**
+   * 第一步：搜到 songmid。
+   *
+   * 这里用的是 `search_for_qq_cp`，**不是** `client_search_cp` ——
+   * 后者现在一律返回 HTTP 500（实测 0 字节、耗时 5.2 秒才失败），
+   * 而它是歌词链路的**首选源**，也就是说每取一次歌词都要先在一个死接口上
+   * 白等 5 秒，再退回网易云；两个平台都拿不到时就表现为「这首歌没有歌词」。
+   * search_for_qq_cp 实测 161ms 返回；同样**必须去掉 new_json=1**
+   * （带上它只给新格式字段，拿不到歌名用于比对）。
+   */
   const searchUrl =
-    `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=3` +
-    `&w=${encodeURIComponent(keyword)}&format=json&cr=1&new_json=1`
+    `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?p=1&n=3` +
+    `&w=${encodeURIComponent(keyword)}&format=json&cr=1`
 
   const searchRes = await httpRequest(searchUrl, {
     method: 'GET',
     headers: { Referer: 'https://y.qq.com/', 'User-Agent': DEFAULT_UA, Accept: 'application/json' },
-    timeout: 8000
+    timeout: 6000
   })
 
   const searchBody = asObj(unwrapJsonp(searchRes.body))
   const list = asArr(asObj(asObj(searchBody.data).song).list)
   if (list.length === 0) return null
 
-  // 优先歌名完全一致的，避免把翻唱的歌词按到原唱头上
-  const target = song.name.trim()
-  const picked =
-    list.find((item) => str(item.title || item.songname).trim() === target) ?? list[0]
-  const mid = str(picked.mid) || str(picked.songmid)
+  // 歌名+歌手双重匹配，避免把翻唱版本的歌词挂到原唱头上
+  const picked = pickBestSongItem(list, song.name, song.singer)
+  const mid = str(picked?.mid) || str(picked?.songmid)
   if (!mid) return null
 
   // 第二步：取歌词（nobase64=1 让接口直接返回明文）
@@ -125,6 +133,69 @@ async function fetchFromQQ(song: Song): Promise<Lyric | null> {
  * 备选：网易云
  * ------------------------------------------------------------------ */
 
+/**
+ * 从候选里挑出「确实是这首歌」的那一条；挑不出匹配的就返回 undefined。
+ *
+ * 为什么必须带歌手一起匹配 —— 这在中文歌上是个实打实的坑：
+ * 周杰伦的版权已从网易云下架，于是搜「晴天 周杰伦」返回的前五条**全是翻唱/AI 版本**
+ * （「晴天(深情版) - Lucky小爱」「晴天 - Jay」…），没有一条是本人。
+ * 只按歌名匹配的话会心安理得地选中翻唱，然后把**翻唱版自己的歌词**
+ * 当成原曲歌词显示 —— 实测「晴天」会显示「你坐在窗边看云走散」
+ * （真正的晴天开头是「故事的小黄花」）、「稻香」会显示「钟摆敲碎三更霜」。
+ * 这比没有歌词更糟：用户会以为自己记错了歌词。
+ *
+ * 所以：歌名和歌手必须同时对得上才认。宁可不显示歌词，也不显示别人的歌词。
+ * 唯一的例外是候选方没给歌手字段（个别接口会缺），那种情况只能退回按歌名匹配。
+ */
+function pickBestSongItem(
+  list: Record<string, unknown>[],
+  targetName: string,
+  singer: string
+): Record<string, unknown> | undefined {
+  if (list.length === 0) return undefined
+  const name = targetName.trim()
+  const primary = singer.split(/[/、,，]/)[0]?.trim() ?? ''
+
+  const nameOf = (item: Record<string, unknown>): string =>
+    str(item.name ?? item.title ?? item.songname).trim()
+  const artistsOf = (item: Record<string, unknown>): string => {
+    const arr = item.artists ?? item.singer
+    if (Array.isArray(arr)) {
+      return arr.map((a) => str((a as Record<string, unknown>)?.name)).join('/')
+    }
+    return str(arr)
+  }
+  const nameMatches = (item: Record<string, unknown>): boolean => {
+    const got = nameOf(item)
+    return got === name || got.includes(name) || name.includes(got)
+  }
+  const singerMatches = (item: Record<string, unknown>): boolean => {
+    const got = artistsOf(item)
+    if (!got.trim()) return true // 对方没给歌手，只能放行，否则永远匹配不上
+    return primary ? got.includes(primary) : true
+  }
+
+  /**
+   * 别拿改版（翻唱 / 深情版 / 治愈版 / 女声版 / Cover / AI）的歌词当成原曲歌词。
+   *
+   * 光靠歌手匹配挡不住 —— 实测「稻香(治愈版)」的歌手字段写的是
+   * 「周杰伦./街道办GDC/欧阳耀莹.」，照样包含「周杰伦」，是拿名字蹭搜的。
+   * 好在项目里已经有成熟的改版标记检测（shared/purity.ts），直接复用：
+   * 用户找的是《晴天》，就不能把《晴天(深情版)》的歌词挂上去。
+   */
+  const wantVariant = hasVariantMark(targetName)
+  const variantMatches = (item: Record<string, unknown>): boolean =>
+    wantVariant || !hasVariantMark(nameOf(item))
+
+  const strict = list.find(
+    (item) => nameMatches(item) && singerMatches(item) && variantMatches(item)
+  )
+  if (strict) return strict
+  // 一条都对不上 —— 返回 undefined，让上层判定为「这首没有歌词」，
+  // 而不是随便挑一条把别人的歌词显示出来。
+  return undefined
+}
+
 async function fetchFromNetease(song: Song): Promise<Lyric | null> {
   const keyword = buildKeyword(song)
   if (!keyword) return null
@@ -141,13 +212,23 @@ async function fetchFromNetease(song: Song): Promise<Lyric | null> {
   const list = asArr(asObj(body.result).songs)
   if (list.length === 0) return null
 
-  const target = song.name.trim()
-  const picked = list.find((item) => str(item.name).trim() === target) ?? list[0]
-  const id = str(picked.id)
+  const picked = pickBestSongItem(list, song.name, song.singer)
+  const id = str(picked?.id)
   if (!id) return null
 
+  /**
+   * 取歌词。
+   *
+   * 这里必须是 lv=-1 / kv=-1，**不能是 lv=1** ——
+   * 实测（同一首歌、同一时刻）：
+   *     lv=1&kv=1&tv=-1  → lrc.lyric 是空字符串
+   *     lv=-1&kv=-1&tv=-1 → lrc.lyric 有 381 字
+   * 接口对 lv=1 返回 200 且结构完整，只是歌词字段为空 —— 不报错、
+   * 只是「这首歌没有歌词」，是那种最难查的静默失败。
+   * 「晴天」这种超主流曲目都会中招，换成 -1 立刻正常。
+   */
   const lyricRes = await httpRequest(
-    `https://music.163.com/api/song/lyric?id=${encodeURIComponent(id)}&lv=1&kv=1&tv=-1`,
+    `https://music.163.com/api/song/lyric?id=${encodeURIComponent(id)}&lv=-1&kv=-1&tv=-1`,
     { method: 'GET', headers: NETEASE_HEADERS, timeout: 8000 }
   )
 

@@ -2,6 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import type { Song } from '@shared/types/music'
+import AppIcon from '../components/AppIcon.vue'
+import PlaylistMenu from '../components/PlaylistMenu.vue'
 import SongTable from '../components/SongTable.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
@@ -37,6 +39,10 @@ const newName = ref('')
 const renamingId = ref<string | null>(null)
 const renameValue = ref('')
 const toast = ref<string | null>(null)
+/** 批量勾选的歌曲 id（列表在下面，多选用得着） */
+const selectedIds = ref<string[]>([])
+const playlistMenuOpen = ref(false)
+const playlistMenuAnchor = ref<HTMLElement | null>(null)
 
 const activePlaylist = computed(
   () => library.playlists.find((p) => p.id === activePlaylistId.value) ?? null
@@ -50,11 +56,28 @@ const songs = computed<Song[]>(() => {
 })
 
 const emptyText = computed(() => {
-  if (tab.value === 'favorites') return '还没有收藏的歌 —— 在搜索页点歌曲右侧的 ♡ 即可收藏'
+  if (tab.value === 'favorites') return '还没有收藏的歌 —— 在搜索页点歌曲右侧的心形按钮即可收藏'
   if (tab.value === 'history') return '还没有播放记录，去搜索页听一首吧'
   if (!activePlaylist.value) return '左侧选择一个歌单，或者先新建一个'
-  return '这个歌单还是空的'
+  return '这个歌单还是空的 —— 去搜索页 /「我的喜欢」点歌曲右侧的歌单按钮，或勾选多首后批量加入'
 })
+
+/** 勾选的歌曲实体（批量加入歌单要用完整对象，不能只有 id） */
+const selectedSongs = computed(() => songs.value.filter((s) => selectedIds.value.includes(s.id)))
+
+function clearSelection(): void {
+  selectedIds.value = []
+}
+
+function switchTab(next: Tab): void {
+  tab.value = next
+  clearSelection()
+}
+
+function selectPlaylist(id: string): void {
+  activePlaylistId.value = id
+  clearSelection()
+}
 
 onMounted(() => {
   void library.refresh()
@@ -132,6 +155,29 @@ async function clearCurrentPlaylist(): Promise<void> {
   await library.clearPlaylist(playlist.id)
   notify('歌单已清空')
 }
+
+/* ------------------------------ 批量操作 ------------------------------ */
+
+/** 勾选若干首 → 一次性塞进歌单（歌单满了才用得顺手，一首一首点太苦） */
+function openBulkPlaylistMenu(event: MouseEvent): void {
+  if (selectedSongs.value.length === 0) return
+  playlistMenuAnchor.value = event.currentTarget as HTMLElement
+  playlistMenuOpen.value = true
+}
+
+function onAddedToPlaylist(playlist: string, count: number): void {
+  notify(`已把 ${count} 首加入《${playlist}》`)
+  clearSelection()
+}
+
+async function removeSelectedFromPlaylist(): Promise<void> {
+  const playlist = activePlaylist.value
+  if (!playlist || selectedIds.value.length === 0) return
+  const count = selectedIds.value.length
+  await library.removeSongsFromPlaylist(playlist.id, [...selectedIds.value])
+  clearSelection()
+  notify(`已从歌单移除 ${count} 首`)
+}
 </script>
 
 <template>
@@ -152,7 +198,7 @@ async function clearCurrentPlaylist(): Promise<void> {
             :key="item.id"
             class="ghost small"
             :class="{ active: tab === item.id }"
-            @click="tab = item.id"
+            @click="switchTab(item.id)"
           >
             {{ item.label }}
           </button>
@@ -183,6 +229,25 @@ async function clearCurrentPlaylist(): Promise<void> {
           清空歌单
         </button>
       </div>
+
+      <!-- 勾选了歌曲才出现的批量条：加入歌单是这里的头等大事 -->
+      <div v-if="selectedIds.length > 0" class="bulk">
+        <span class="small-text">已选 {{ selectedIds.length }} 首</span>
+        <button class="ghost small" @click="openBulkPlaylistMenu">
+          <AppIcon name="playlist" :size="13" />
+          <span>加入歌单</span>
+        </button>
+        <button
+          v-if="tab === 'playlists' && activePlaylist"
+          class="ghost small danger"
+          @click="removeSelectedFromPlaylist"
+        >
+          <AppIcon name="close" :size="12" />
+          <span>移出歌单</span>
+        </button>
+        <div class="grow"></div>
+        <button class="ghost small" @click="clearSelection">取消选择</button>
+      </div>
     </header>
 
     <div class="body" :class="{ split: tab === 'playlists' }">
@@ -199,7 +264,7 @@ async function clearCurrentPlaylist(): Promise<void> {
             :key="p.id"
             class="pl-item"
             :class="{ active: p.id === activePlaylistId }"
-            @click="activePlaylistId = p.id"
+            @click="selectPlaylist(p.id)"
           >
             <input
               v-if="renamingId === p.id"
@@ -233,21 +298,34 @@ async function clearCurrentPlaylist(): Promise<void> {
           :current-id="player.current?.id ?? ''"
           :empty-text="emptyText"
           :removable="tab === 'playlists'"
+          selectable
+          :selected-ids="selectedIds"
+          @update:selected-ids="selectedIds = $event"
           @play="playSong"
           @queue="queueSong"
           @download="downloadSong"
           @remove="removeFromPlaylist"
           @search="searchByKeyword"
+          @added="onAddedToPlaylist"
         />
 
-        <!-- 歌单视图下额外提供「从歌单移除」 -->
+        <!-- 歌单视图下的提示 -->
         <div v-if="tab === 'playlists' && activePlaylist && songs.length > 0" class="hint-bar">
           <span class="faint small-text">
-            在「{{ activePlaylist.name }}」中 · 点歌曲可播放，用搜索页的 ↓ 下载
+            在「{{ activePlaylist.name }}」中 · 勾选多首可批量移出，或加入别的歌单
           </span>
         </div>
       </div>
     </div>
+
+    <!-- 批量加入歌单：面板挂在 body 上，位置跟着「加入歌单」按钮 -->
+    <PlaylistMenu
+      v-if="playlistMenuOpen"
+      :songs="selectedSongs"
+      :anchor="playlistMenuAnchor"
+      @close="playlistMenuOpen = false"
+      @added="onAddedToPlaylist"
+    />
 
     <Transition name="fade">
       <div v-if="toast" class="toast">{{ toast }}</div>
@@ -309,6 +387,23 @@ async function clearCurrentPlaylist(): Promise<void> {
 .tabs .ghost.active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* 批量条：勾选后才出现，压在工具条下方 */
+.bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+
+.bulk button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 /* ------------------------------ 主体 ------------------------------ */

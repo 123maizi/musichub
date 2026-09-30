@@ -47,7 +47,7 @@ export interface IpcContext {
 }
 
 /** 注册全部 IPC 处理器，并把服务的推送事件转发到渲染层 */
-export function registerIpc(ctx: IpcContext): void {
+export function registerIpc(ctx: IpcContext): () => void {
   const { sources, search, resolver, downloads, proxy, ai, savedTranslations } = ctx
 
   /* ------------------------------ 音源 ------------------------------ */
@@ -470,19 +470,48 @@ export function registerIpc(ctx: IpcContext): void {
 
   const broadcast = (channel: string, payload: unknown): void => {
     for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send(channel, payload)
+      if (win.isDestroyed()) continue
+      try {
+        win.webContents.send(channel, payload)
+      } catch {
+        // 窗口正好在这一瞬被销毁（退出时很常见）：丢掉这一帧即可，不能让它冒泡
+        // 成 unhandledRejection 把退出流程搞乱
+      }
     }
   }
 
-  downloads.on('progress', (task) => broadcast(EV.downloadProgress, task))
-  downloads.on('done', (task) => broadcast(EV.downloadDone, task))
-  downloads.on('error', (task) => broadcast(EV.downloadError, task))
-  sources.on('changed', (list) => broadcast(EV.sourceChanged, list))
+  // 保存成具名引用：退出时要能精确摘除，而不是 removeAllListeners 一刀切
+  const onDownloadProgress = (task: unknown): void => broadcast(EV.downloadProgress, task)
+  const onDownloadDone = (task: unknown): void => broadcast(EV.downloadDone, task)
+  const onDownloadError = (task: unknown): void => broadcast(EV.downloadError, task)
+  const onSourceChanged = (list: unknown): void => broadcast(EV.sourceChanged, list)
+
+  downloads.on('progress', onDownloadProgress)
+  downloads.on('done', onDownloadDone)
+  downloads.on('error', onDownloadError)
+  sources.on('changed', onSourceChanged)
+
+  /**
+   * 释放函数：退出时调用。
+   *
+   * 为什么要显式释放：主进程退出时这些转发闭包会把 downloads / sources
+   * 一直引用在 IPC 层，`ipcMain.handle` 注册的通道也留在 Electron 内部表里。
+   * 顺手摘干净，退出路径上就没有「谁还引用着谁」的悬念。
+   */
+  return (): void => {
+    downloads.off('progress', onDownloadProgress)
+    downloads.off('done', onDownloadDone)
+    downloads.off('error', onDownloadError)
+    sources.off('changed', onSourceChanged)
+    unregisterIpc()
+  }
 }
 
-/** 释放 IPC 监听（窗口重建时用） */
+/** 释放 IPC 监听（窗口重建 / 退出时用） */
 export function unregisterIpc(): void {
   for (const channel of Object.values(CH)) {
+    // handle 通道与 on 通道都要清：只清 handle 会留下 on 的监听
     ipcMain.removeHandler(channel)
+    ipcMain.removeAllListeners(channel)
   }
 }
