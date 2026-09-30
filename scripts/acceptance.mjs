@@ -216,25 +216,68 @@ async function checkDownload() {
   return r
 }
 
-/** 7. 封面：真实渲染出来的比例（naturalWidth > 0 才算真的加载出来） */
+/**
+ * 7. 封面：真实渲染出来的比例（naturalWidth > 0 才算真的加载出来）
+ *
+ * 必须先把整张列表滚一遍再统计 —— 列表小图现在是 loading="lazy"，
+ * 不滚动浏览器根本不会发请求，会把「还没轮到加载」误报成「加载失败」。
+ * 这个坑我踩过一次：同一份构建，不滚动量到 58%，滚完是 100%。
+ */
 async function checkCovers() {
   await inPage(`
     window.location.hash = '#/search'
     await new Promise(r => setTimeout(r, 2500))
     return 1
   `)
-  await sleep(6000)
+  await sleep(5000)
+
+  // 滚到底再滚回顶，触发全部懒加载
+  await inPage(`
+    const list = document.querySelector('.list, .results')
+    if (list) {
+      const total = list.scrollHeight
+      for (let y = 0; y <= total; y += 400) {
+        list.scrollTop = y
+        await new Promise(r => setTimeout(r, 60))
+      }
+      list.scrollTop = total
+      await new Promise(r => setTimeout(r, 1200))
+      list.scrollTop = 0
+    } else {
+      window.scrollTo(0, document.body.scrollHeight)
+    }
+    return 1
+  `)
+  // 给懒加载留出发请求 + 解码的时间，然后轮询到稳定
+  let last = -1
+  for (let i = 0; i < 12; i += 1) {
+    await sleep(1500)
+    const loaded = await inPage(`
+      let n = 0
+      for (const row of document.querySelectorAll('.results .row')) {
+        const img = row.querySelector('.mini-cover img, .cover img')
+        if (img && img.complete && img.naturalWidth > 0) n++
+      }
+      return n
+    `)
+    if (loaded === last) break
+    last = loaded
+  }
+
   return await inPage(`
     const rows = [...document.querySelectorAll('.results .row')]
     let withImg = 0, loaded = 0
+    const failed = []
     for (const row of rows) {
       const img = row.querySelector('.mini-cover img, .cover img')
       if (!img) continue
       withImg++
       if (img.complete && img.naturalWidth > 0) loaded++
+      else failed.push((row.querySelector('.title')?.innerText ?? '').trim().slice(0, 20))
     }
     return { 总行数: rows.length, 有图片元素: withImg, 真正加载出来: loaded,
-             覆盖率: rows.length ? Math.round(loaded / rows.length * 100) + '%' : '—' }
+             覆盖率: rows.length ? Math.round(loaded / rows.length * 100) + '%' : '—',
+             未加载示例: failed.slice(0, 5) }
   `)
 }
 
