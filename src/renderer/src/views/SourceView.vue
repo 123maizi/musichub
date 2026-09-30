@@ -67,11 +67,7 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 <template>
   <section class="view">
     <header class="header">
-      <div class="title-row">
-        <h2>音源</h2>
-        <span class="faint small-text">音源决定「能不能听、能听到多好」</span>
-      </div>
-
+      <!-- 页面标题由外壳顶栏渲染；这里只留统计、过滤与导入工具条 -->
       <div class="stats">
         <div class="stat">
           <span class="num mono">{{ stats.ready }}</span>
@@ -92,18 +88,6 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
       </div>
 
       <div class="actions">
-        <button class="primary" :disabled="sources.busy" @click="sources.importFromDialog()">
-          从文件导入
-        </button>
-        <button
-          :disabled="sources.busy"
-          @click="showUrlBox = !showUrlBox"
-        >
-          从 URL 导入
-        </button>
-        <button :disabled="sources.busy" @click="sources.importBundled()">导入内置音源</button>
-        <button class="ghost small" @click="sources.refresh()">刷新</button>
-        <button class="ghost small" @click="api.source.openDir()">打开目录</button>
         <div class="grow"></div>
         <div class="filter">
           <button
@@ -147,6 +131,21 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 
       <div v-if="sources.error" class="err-box">{{ sources.error }}</div>
     </header>
+
+    <!-- 导入/刷新这类页面级动作注入外壳顶栏 -->
+    <Teleport to="#page-actions">
+      <button class="primary small" :disabled="sources.busy" @click="sources.importFromDialog()">
+        从文件导入
+      </button>
+      <button class="ghost small" :disabled="sources.busy" @click="showUrlBox = !showUrlBox">
+        从 URL 导入
+      </button>
+      <button class="ghost small" :disabled="sources.busy" @click="sources.importBundled()">
+        导入内置音源
+      </button>
+      <button class="ghost small" @click="sources.refresh()">刷新</button>
+      <button class="ghost small" @click="api.source.openDir()">打开目录</button>
+    </Teleport>
 
     <div v-if="sources.loading" class="empty"><span class="mono">正在装载音源…</span></div>
 
@@ -261,53 +260,44 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
   min-height: 0;
 }
 
+/* 左右留白由外壳 .page 负责，视图不再自加 */
 .header {
-  padding: 18px;
+  padding: 0 0 var(--sp-3);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.title-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-
-.title-row h2 {
-  font-size: 17px;
+  gap: var(--sp-3);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .small-text {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 /* ------------------------------ 统计 ------------------------------ */
 
 .stats {
   display: flex;
-  gap: 26px;
+  gap: var(--sp-5);
 }
 
 .stat {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: var(--sp-1);
 }
 
 .stat .num {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--ink);
 }
 
 .stat.danger .num {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .stat .faint {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 /* ------------------------------ 操作 ------------------------------ */
@@ -315,20 +305,28 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 .actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
+/* 过滤分段控件：刻线分格，无胶囊 */
 .filter {
   display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  gap: 0;
+  padding: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
 }
 
 .filter .ghost {
-  border-radius: 4px;
+  border-radius: 0;
+  border-color: transparent;
+  padding: var(--sp-1) var(--sp-3);
+}
+
+.filter .ghost + .ghost {
+  border-left: 1px solid var(--hairline);
 }
 
 .filter .ghost.active {
@@ -338,7 +336,7 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 
 .url-box {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .url-box input {
@@ -348,17 +346,17 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 .import-result {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
 }
 
 .err-box {
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(212, 87, 76, 0.3);
-  background: rgba(212, 87, 76, 0.08);
-  color: #e79a92;
-  font-size: 12.5px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-card);
+  border: 1px solid var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  font-size: var(--fs-xs);
 }
 
 /* ------------------------------ 列表 ------------------------------ */
@@ -367,23 +365,23 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 0 18px;
 }
 
 .item {
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--hairline-soft);
 }
 
+/* 失败项：左侧 2px 危险色刻线，而不是整块染色（石刻语言） */
 .item.error {
-  background: linear-gradient(90deg, rgba(212, 87, 76, 0.05), transparent 55%);
+  background-image: linear-gradient(to right, var(--danger) 0 2px, transparent 2px);
 }
 
 .main-row {
   display: grid;
   grid-template-columns: minmax(240px, 1.6fr) auto auto;
   align-items: center;
-  gap: 16px;
-  padding: 11px 0;
+  gap: var(--sp-4);
+  padding: var(--sp-3) 0;
 }
 
 .name-col {
@@ -393,26 +391,26 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 .name-line {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--sp-1);
   min-width: 0;
 }
 
 .name {
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sub-line {
-  font-size: 11.5px;
-  margin-top: 2px;
+  font-size: var(--fs-xs);
+  margin-top: var(--sp-1);
 }
 
 .platforms {
   display: flex;
-  gap: 3px;
+  gap: var(--sp-1);
   flex-wrap: wrap;
   justify-content: flex-end;
   max-width: 260px;
@@ -420,53 +418,55 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 
 .ops {
   display: flex;
-  gap: 3px;
+  gap: var(--sp-1);
 }
 
 /* ------------------------------ 详情 ------------------------------ */
 
 .detail {
-  padding: 4px 0 16px 0;
+  padding: var(--sp-1) 0 var(--sp-4);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--sp-3);
 }
 
 .detail-block {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--sp-1);
 }
 
+/* 小节标题：碑刻小标签 */
 .detail-title {
-  font-size: 11px;
-  letter-spacing: 0.06em;
+  font-family: var(--font-display);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-display);
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--ink-subtle);
 }
 
 .caps {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 
 .cap {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 11.5px;
+  gap: var(--sp-3);
+  font-size: var(--fs-xs);
   flex-wrap: wrap;
 }
 
 .err-block pre {
   margin: 0;
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  background: rgba(212, 87, 76, 0.08);
-  border: 1px solid rgba(212, 87, 76, 0.25);
-  color: #e79a92;
-  font-size: 11.5px;
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+  color: var(--danger-text);
+  font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 140px;
@@ -475,19 +475,19 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 }
 
 .path {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   word-break: break-all;
   user-select: text;
 }
 
 .logs {
   margin: 0;
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  font-size: 11px;
-  color: var(--text-dim);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  font-size: var(--fs-xs);
+  color: var(--ink-muted);
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 160px;
@@ -500,9 +500,9 @@ async function confirmRemove(source: SourceInfo): Promise<void> {
 .coverage {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   flex-wrap: wrap;
-  padding: 10px 18px;
-  border-top: 1px solid var(--line-soft);
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--hairline-soft);
 }
 </style>

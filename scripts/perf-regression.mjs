@@ -54,7 +54,8 @@ try {
 
 /* ------------------------------ 1. 搜索 140 行 ------------------------------ */
 window.location.hash = '#/search'
-await sleep(700)
+// 路由过渡是 out-in（旧视图先退、新视图再进），固定 sleep 会撞上过渡窗口
+await waitFor('搜索页挂载', () => $('.search-box input') ?? null, 10000)
 const input = $('.search-box input')
 const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
 setter.call(input, '周杰伦')
@@ -122,7 +123,9 @@ check('当前播放行高亮', highlighted === 1 && highlightedIdx === 0 && play
 })
 
 /* ------------------------------ 4. 多选 ------------------------------ */
-$$('.meta-row button').find((b) => b.innerText.includes('多选'))?.click()
+/* UI 改版后「多选 / 下载所选」搬到了外壳顶栏的 #page-actions，所以按文案全局找按钮 */
+const findBtn = (text) => [...document.querySelectorAll('button')].find((b) => b.innerText.includes(text))
+findBtn('多选')?.click()
 await sleep(400)
 const boxes = $$('.results .row .row-check')
 check('多选模式给每一行都渲染出复选框', boxes.length > 0 && boxes.length === searchStore.visibleSongs.length, {
@@ -137,7 +140,10 @@ boxes[2].click()
 await sleep(250)
 boxes[3].click()
 await sleep(400)
-const selectedText = $$('.meta-row .small-text').map((s) => s.innerText.trim()).find((t) => t.includes('已选')) ?? null
+const selectedText =
+  $$('.small-text')
+    .map((s) => s.innerText.trim())
+    .find((t) => t.includes('已选')) ?? null
 const checkedInDom = $$('.results .row .row-check:checked').length
 check('勾选 3 首生效', /已选\s*3\s*首/.test(selectedText ?? '') && checkedInDom === 3, {
   selectedText,
@@ -146,7 +152,7 @@ check('勾选 3 首生效', /已选\s*3\s*首/.test(selectedText ?? '') && check
 
 /* ------------------------------ 4. 批量下载 ------------------------------ */
 const beforeTasks = (await window.api.download.list()).length
-$$('.meta-row button').find((b) => b.innerText.includes('下载所选'))?.click()
+findBtn('下载所选')?.click()
 const bulkToast = await waitFor('批量下载回执', () => {
   const t = $('.toast')?.innerText?.trim() ?? ''
   return t.includes('加入下载队列') ? t : null

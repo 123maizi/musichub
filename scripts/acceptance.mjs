@@ -69,6 +69,51 @@ async function inPage(code) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/* ------------------------------ 导航 ------------------------------ */
+
+/**
+ * 切页必须用「点导航柱」，不能用 `location.hash = ...`。
+ *
+ * main-lifecycle 实测发现：这个外壳里直接改 hash，hash 与顶栏标题会跟着变、
+ * 但内容区的视图经常**不换**（DOM 里会留着 route-leave-active）。点左侧导航柱
+ * （走 router.push）则每次都成功。我第一版验收脚本全程用 hash 导航，于是出现过
+ * 「已经跳到正在播放页、量到的却是搜索页的按钮」这种假失败 —— 报出来的
+ * 「歌词 0 行」「点了下载但没入队」都是这么来的。
+ *
+ * 所以这里统一：能点导航柱就点，点完还要**等视图身份出现**再返回。
+ */
+const RAIL_LABEL = {
+  '#/search': '搜索',
+  '#/library': '我的',
+  '#/downloads': '下载',
+  '#/sources': '音源',
+  '#/settings': '设置'
+}
+
+async function goView(hash, expectSelector, timeoutMs = 15000) {
+  if (RAIL_LABEL[hash]) {
+    await inPage(`
+      const want = ${JSON.stringify(RAIL_LABEL[hash])}
+      const b = [...document.querySelectorAll('.rail .nav-item')]
+        .find(x => (x.querySelector('.nav-label')?.textContent ?? '').includes(want))
+      if (b) b.click()
+      return 1
+    `)
+  } else {
+    await inPage(`window.location.hash = ${JSON.stringify(hash)}; return 1`)
+  }
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await sleep(400)
+    const ok = await inPage(`
+      if (document.querySelector('.route-leave-active')) return false
+      return !!document.querySelector(${JSON.stringify(expectSelector)})
+    `)
+    if (ok) return true
+  }
+  return false
+}
+
 /* ------------------------------ 各项检查 ------------------------------ */
 
 async function checkEnv() {
@@ -87,10 +132,10 @@ async function checkSources() {
 
 /** 2. 搜索：五个平台都要能出结果 */
 async function checkSearch() {
+  await goView('#/search', '.search-box input')
   await inPage(`
-    window.location.hash = '#/search'
-    await new Promise(r => setTimeout(r, 1500))
     const input = document.querySelector('.search-box input')
+    if (!input) return 0
     input.focus(); input.value = ''
     input.dispatchEvent(new Event('input', { bubbles: true }))
     await new Promise(r => setTimeout(r, 150))
@@ -134,10 +179,9 @@ async function checkPlayback() {
 
 /** 4. 歌词 + 译文能力（轮询等待，不用固定 sleep —— 歌词是异步拉的，快慢取决于音源） */
 async function checkLyric() {
-  await inPage(`
-    window.location.hash = '#/now-playing'
-    return 1
-  `)
+  // 正在播放页不在导航柱上，只能改 hash —— 但必须等视图身份真的换过来，
+  // 否则量到的是上一页的 DOM（这就是之前报「歌词 0 行」的原因）。
+  await goView('#/now-playing', '.lyric-line, .lyric-empty, .stage')
   // 等到歌词行真的出现为止，最多 20 秒
   let hit = 0
   for (let i = 0; i < 20; i += 1) {
@@ -151,6 +195,7 @@ async function checkLyric() {
     const buttons = [...document.querySelectorAll('button')].map(b => b.innerText.trim())
     return {
       当前路由: location.hash,
+      视图身份: document.querySelector('.stage') ? '正在播放页' : '不是正在播放页',
       歌词行数: withText.length,
       首行: withText[0] ? withText[0].innerText.trim().slice(0, 30) : null,
       空态提示: document.querySelector('.lyric-empty')?.innerText?.replace(/\\s+/g, ' ').trim().slice(0, 60) ?? null,
@@ -179,10 +224,7 @@ async function checkLibrary() {
 async function checkDownload() {
   // 前面的用例可能把页面带到别处了（比如播放页），这里自己先回到搜索结果，
   // 不依赖调用顺序 —— 否则会得出「找不到搜索结果」这种假失败。
-  await inPage(`
-    window.location.hash = '#/search'
-    return 1
-  `)
+  await goView('#/search', '.results .row')
   let rows = 0
   for (let i = 0; i < 25; i += 1) {
     await sleep(1000)
@@ -223,13 +265,37 @@ async function checkDownload() {
  * 不滚动浏览器根本不会发请求，会把「还没轮到加载」误报成「加载失败」。
  * 这个坑我踩过一次：同一份构建，不滚动量到 58%，滚完是 100%。
  */
-async function checkCovers() {
+/**
+ * 确保搜索结果在列表里 —— 有些用例（下载完成后、从别的视图切回来）
+ * 可能拿到空列表，这里自己重新发一次搜索再等结果，避免把「没结果」
+ * 误报成「封面没加载」。
+ */
+async function ensureRows(min = 1, timeoutMs = 30000) {
+  const count = async () => await inPage(`return document.querySelectorAll('.results .row').length`)
+  if ((await count()) >= min) return true
   await inPage(`
-    window.location.hash = '#/search'
-    await new Promise(r => setTimeout(r, 2500))
+    const input = document.querySelector('.search-box input')
+    if (!input) return 0
+    input.focus(); input.value = ''
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(r => setTimeout(r, 150))
+    input.value = '周杰伦'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
     return 1
   `)
-  await sleep(5000)
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await sleep(1000)
+    if ((await count()) >= min) return true
+  }
+  return false
+}
+
+async function checkCovers() {
+  await goView('#/search', '.results .row')
+  await ensureRows(1)
+  await sleep(3000)
 
   // 滚到底再滚回顶，触发全部懒加载
   await inPage(`
@@ -248,9 +314,13 @@ async function checkCovers() {
     }
     return 1
   `)
-  // 给懒加载留出发请求 + 解码的时间，然后轮询到稳定
+  // 给懒加载留出发请求 + 解码的时间，然后轮询到稳定。
+  // 必须要求「连续 3 次读数相同」才算稳定 —— 只用「一变就停」会在列表刚被
+  // 重新搜索过时过早收工：图片分批加载中间有一段平台期，那时读数也不变，
+  // 我曾因此把 138/139 误报成 81/139（58%）。
   let last = -1
-  for (let i = 0; i < 12; i += 1) {
+  let same = 0
+  for (let i = 0; i < 30; i += 1) {
     await sleep(1500)
     const loaded = await inPage(`
       let n = 0
@@ -260,8 +330,13 @@ async function checkCovers() {
       }
       return n
     `)
-    if (loaded === last) break
-    last = loaded
+    if (loaded === last) {
+      same += 1
+      if (same >= 3) break
+    } else {
+      same = 0
+      last = loaded
+    }
   }
 
   return await inPage(`
@@ -283,15 +358,11 @@ async function checkCovers() {
 
 /** 8. 进度条单调性：采样 20 秒，读数只增不减 */
 async function checkProgressMonotonic() {
-  await inPage(`
-    window.location.hash = '#/downloads'
-    await new Promise(r => setTimeout(r, 2500))
-    return 1
-  `)
+  // 先去下载页再回来，确认切页往返不会把播放状态弄丢
+  await goView('#/downloads', '.page')
   const samples = []
+  await goView('#/search', '.results .row')
   await inPage(`
-    window.location.hash = '#/search'
-    await new Promise(r => setTimeout(r, 1500))
     const rows = [...document.querySelectorAll('.results .row')]
     rows[0]?.querySelector('.col-actions button[title="播放"]')?.click()
     return 1

@@ -193,18 +193,16 @@ async function downloadSong(song: Song): Promise<void> {
 
 <template>
   <section class="view">
-    <header class="bar">
-      <button class="icon-btn" title="返回" @click="router.back()">
-        <AppIcon name="back" :size="18" />
+    <!-- 页面标题由外壳顶栏渲染；播放/下载/魔改过滤是页面级动作，注入顶栏右侧 -->
+    <Teleport to="#page-actions">
+      <button class="primary small" :disabled="songs.length === 0" @click="playAll">
+        <AppIcon name="play" :size="14" />
+        <span>播放全部</span>
       </button>
-      <div class="grow"></div>
-
-      <span v-if="artist && songs.length > 0" class="faint small-text">
-        {{ songs.length }} 首歌<template v-if="hiddenCount > 0 && !showJunk">
-          · 已滤掉 {{ hiddenCount }} 首魔改</template
-        >
-      </span>
-
+      <button class="ghost small" :disabled="songs.length === 0" @click="downloadAll">
+        <AppIcon name="download" :size="14" />
+        <span>下载全部</span>
+      </button>
       <button
         v-if="hiddenCount > 0 || showJunk"
         class="ghost small"
@@ -213,7 +211,7 @@ async function downloadSong(song: Song): Promise<void> {
       >
         {{ showJunk ? '隐藏魔改版' : `显示魔改版 (${hiddenCount})` }}
       </button>
-    </header>
+    </Teleport>
 
     <!-- 艺人资料 -->
     <div v-if="artist" class="hero">
@@ -226,16 +224,17 @@ async function downloadSong(song: Song): Promise<void> {
         <div class="meta">
           <span v-for="(part, index) in metaParts" :key="index">{{ part }}</span>
           <span class="tag">{{ platformName }}</span>
+          <span v-if="songs.length > 0" class="faint">
+            {{ songs.length }} 首<template v-if="hiddenCount > 0 && !showJunk">
+              · 已滤掉 {{ hiddenCount }} 首魔改</template
+            >
+          </span>
         </div>
 
         <div class="actions">
-          <button class="primary" :disabled="songs.length === 0" @click="playAll">
-            <AppIcon name="play" :size="14" />
-            <span>播放全部</span>
-          </button>
-          <button :disabled="songs.length === 0" @click="downloadAll">
-            <AppIcon name="download" :size="14" />
-            <span>下载全部</span>
+          <button class="ghost small" title="返回上一页" @click="router.back()">
+            <AppIcon name="back" :size="14" />
+            <span>返回</span>
           </button>
         </div>
       </div>
@@ -266,7 +265,7 @@ async function downloadSong(song: Song): Promise<void> {
       />
     </div>
 
-    <Transition name="fade">
+    <Transition name="toast-center">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
   </section>
@@ -281,33 +280,8 @@ async function downloadSong(song: Song): Promise<void> {
   position: relative;
 }
 
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.icon-btn {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
-}
-
-.icon-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
 .small-text {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 /* ------------------------------ 艺人资料 ------------------------------ */
@@ -315,59 +289,55 @@ async function downloadSong(song: Song): Promise<void> {
 .hero {
   display: flex;
   align-items: center;
-  gap: 22px;
-  padding: 26px 24px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--sp-5);
+  padding: var(--sp-5) 0;
+  border-bottom: 1px solid var(--hairline);
 }
 
+/* 圆形头像是全站唯一的 pill/圆形例外（结构需要，不是装饰） */
 .avatar {
   flex: none;
   width: 116px;
   height: 116px;
   border-radius: 50%;
   overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
   display: grid;
   place-items: center;
-  color: var(--text-faint);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  color: var(--ink-subtle);
 }
 
 .info {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
 .info h1 {
-  font-size: 26px;
-  font-weight: 600;
-  line-height: 1.2;
+  font-size: var(--fs-lg);
 }
 
 .meta {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 12.5px;
-  color: var(--text-dim);
+  gap: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-muted);
   flex-wrap: wrap;
 }
 
 .actions {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
 }
 
 .actions button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  border-radius: 18px;
-  padding: 7px 16px;
+  gap: var(--sp-1);
 }
 
 /* ------------------------------ 歌曲 ------------------------------ */
@@ -377,7 +347,7 @@ async function downloadSong(song: Song): Promise<void> {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 8px 4px 0;
+  padding: var(--sp-2) 0 0;
   overflow: hidden;
 }
 
@@ -386,16 +356,16 @@ async function downloadSong(song: Song): Promise<void> {
 }
 
 .notice {
-  margin: 10px 18px 0;
-  padding: 9px 14px;
-  font-size: 12.5px;
-  border-radius: var(--radius-sm);
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-card);
 }
 
 .notice.err {
-  border: 1px solid rgba(212, 87, 76, 0.3);
-  background: rgba(212, 87, 76, 0.08);
-  color: #e79a92;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
 }
 
 .empty {
@@ -404,29 +374,20 @@ async function downloadSong(song: Song): Promise<void> {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--text-faint);
+  gap: var(--sp-2);
+  color: var(--ink-subtle);
 }
 
 .toast {
   position: absolute;
-  bottom: 20px;
+  bottom: var(--sp-5);
   left: 50%;
   transform: translateX(-50%);
-  padding: 8px 18px;
-  border-radius: 20px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  font-size: 12.5px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.18s;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-card);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-strong);
+  font-size: var(--fs-xs);
+  color: var(--ink);
 }
 </style>

@@ -183,14 +183,7 @@ async function removeSelectedFromPlaylist(): Promise<void> {
 <template>
   <section class="view">
     <header class="header">
-      <div class="title-row">
-        <h2>我的音乐</h2>
-        <span class="faint small-text">
-          收藏 {{ library.stats.favorites }} · 历史 {{ library.stats.history }} · 歌单
-          {{ library.stats.playlists }}
-        </span>
-      </div>
-
+      <!-- 页面标题由外壳顶栏渲染（route.meta.title）；这里只留工具条 -->
       <div class="actions">
         <div class="tabs">
           <button
@@ -204,30 +197,10 @@ async function removeSelectedFromPlaylist(): Promise<void> {
           </button>
         </div>
         <div class="grow"></div>
-        <button class="ghost small" :disabled="songs.length === 0" @click="downloadAll">
-          全部下载
-        </button>
-        <button
-          v-if="tab === 'favorites' && library.favorites.length > 0"
-          class="ghost small danger"
-          @click="library.clearFavorites()"
-        >
-          清空收藏
-        </button>
-        <button
-          v-if="tab === 'history' && library.history.length > 0"
-          class="ghost small danger"
-          @click="library.clearHistory()"
-        >
-          清空历史
-        </button>
-        <button
-          v-if="tab === 'playlists' && activePlaylist && activePlaylist.songs.length > 0"
-          class="ghost small danger"
-          @click="clearCurrentPlaylist"
-        >
-          清空歌单
-        </button>
+        <span class="faint small-text">
+          收藏 {{ library.stats.favorites }} · 历史 {{ library.stats.history }} · 歌单
+          {{ library.stats.playlists }}
+        </span>
       </div>
 
       <!-- 勾选了歌曲才出现的批量条：加入歌单是这里的头等大事 -->
@@ -249,6 +222,34 @@ async function removeSelectedFromPlaylist(): Promise<void> {
         <button class="ghost small" @click="clearSelection">取消选择</button>
       </div>
     </header>
+
+    <!-- 页面级动作注入外壳顶栏 -->
+    <Teleport to="#page-actions">
+      <button class="ghost small" :disabled="songs.length === 0" @click="downloadAll">
+        全部下载
+      </button>
+      <button
+        v-if="tab === 'favorites' && library.favorites.length > 0"
+        class="ghost small danger"
+        @click="library.clearFavorites()"
+      >
+        清空收藏
+      </button>
+      <button
+        v-if="tab === 'history' && library.history.length > 0"
+        class="ghost small danger"
+        @click="library.clearHistory()"
+      >
+        清空历史
+      </button>
+      <button
+        v-if="tab === 'playlists' && activePlaylist && activePlaylist.songs.length > 0"
+        class="ghost small danger"
+        @click="clearCurrentPlaylist"
+      >
+        清空歌单
+      </button>
+    </Teleport>
 
     <div class="body" :class="{ split: tab === 'playlists' }">
       <!-- 歌单侧栏 -->
@@ -327,7 +328,7 @@ async function removeSelectedFromPlaylist(): Promise<void> {
       @added="onAddedToPlaylist"
     />
 
-    <Transition name="fade">
+    <Transition name="toast-center">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
   </section>
@@ -342,46 +343,44 @@ async function removeSelectedFromPlaylist(): Promise<void> {
   position: relative;
 }
 
+/* 左右留白由外壳 .page 负责，视图不再自加 */
 .header {
-  padding: 18px 18px 12px;
+  padding: 0 0 var(--sp-3);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.title-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-
-.title-row h2 {
-  font-size: 17px;
+  gap: var(--sp-3);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .small-text {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 .actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
+/* 分段控件：石刻语言用刻线分格，不用圆角胶囊 */
 .tabs {
   display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  gap: 0;
+  padding: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
 }
 
 .tabs .ghost {
-  border-radius: 4px;
-  padding: 4px 12px;
+  border-radius: 0;
+  border-color: transparent;
+  padding: var(--sp-1) var(--sp-3);
+}
+
+.tabs .ghost + .ghost {
+  border-left: 1px solid var(--hairline);
 }
 
 .tabs .ghost.active {
@@ -393,17 +392,17 @@ async function removeSelectedFromPlaylist(): Promise<void> {
 .bulk {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  background: var(--surface-1);
 }
 
 .bulk button {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--sp-1);
 }
 
 /* ------------------------------ 主体 ------------------------------ */
@@ -418,7 +417,7 @@ async function removeSelectedFromPlaylist(): Promise<void> {
 .body.split .playlists {
   width: 240px;
   flex: none;
-  border-right: 1px solid var(--line);
+  border-right: 1px solid var(--hairline);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -429,7 +428,7 @@ async function removeSelectedFromPlaylist(): Promise<void> {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: 8px 4px 0;
+  padding: var(--sp-2) 0 0;
   overflow: hidden;
 }
 
@@ -438,48 +437,80 @@ async function removeSelectedFromPlaylist(): Promise<void> {
 }
 
 .hint-bar {
-  padding: 8px 14px;
-  border-top: 1px solid var(--line-soft);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--hairline-soft);
 }
 
 /* ------------------------------ 歌单 ------------------------------ */
 
 .new-playlist {
   display: flex;
-  gap: 6px;
-  padding: 12px;
-  border-bottom: 1px solid var(--line-soft);
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--hairline-soft);
 }
 
 .new-playlist input {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
-  padding: 6px 10px;
+  font-size: var(--fs-xs);
+  padding: var(--sp-1) var(--sp-2);
 }
 
 .pl-list {
   flex: 1;
   overflow-y: auto;
-  padding: 6px;
+  padding: var(--sp-2);
 }
 
 .pl-item {
+  position: relative;
+  z-index: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-card);
   cursor: pointer;
-  transition: background 0.12s;
 }
 
-.pl-item:hover {
-  background: var(--bg-hover);
+/*
+ * 歌单项的 hover / 选中底色同样改覆盖层 + opacity：
+ * 这个列表在歌单多的时候能到几十项，逐项重绘 background 没有意义。
+ * ::before 管 hover，::after 管选中，active 优先（保持原来的观感）。
+ */
+.pl-item::before,
+.pl-item::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out);
 }
 
-.pl-item.active {
-  background: var(--accent-soft);
+.pl-item::before {
+  background-color: var(--surface-3);
+}
+
+.pl-item:hover::before {
+  opacity: 1;
+}
+
+/* 选中：2px 左刻线 + 极淡底，与列表行同一套语言 */
+.pl-item::after {
+  background-color: color-mix(in srgb, var(--accent) 7%, transparent);
+  background-image: linear-gradient(to right, var(--accent) 0 2px, transparent 2px);
+}
+
+.pl-item.active::after {
+  opacity: 1;
+}
+
+.pl-item.active::before {
+  opacity: 0;
 }
 
 .pl-item.active .pl-name {
@@ -489,67 +520,66 @@ async function removeSelectedFromPlaylist(): Promise<void> {
 .pl-name {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-sm);
+  color: var(--ink);
 }
 
 .pl-count {
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
 }
 
 .pl-ops {
   display: flex;
-  gap: 2px;
+  gap: var(--sp-1);
   opacity: 0;
-  transition: opacity 0.12s;
+  transition: opacity var(--dur-1) var(--ease-out);
 }
 
-.pl-item:hover .pl-ops {
+.pl-item:hover .pl-ops,
+.pl-item:focus-within .pl-ops {
   opacity: 1;
 }
 
 .rename-input {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
-  padding: 3px 7px;
+  font-size: var(--fs-xs);
+  padding: var(--sp-1) var(--sp-2);
 }
 
+/* 命中区 ≥24px（WCAG 2.5.8） */
 .tiny {
-  font-size: 11px;
-  padding: 2px 6px;
-  line-height: 1.3;
+  font-size: var(--fs-xs);
+  min-width: 24px;
+  min-height: 24px;
+  padding: var(--sp-1);
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .empty-hint {
-  padding: 20px 10px;
-  font-size: 12px;
+  padding: var(--sp-5) var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
   text-align: center;
-  line-height: 1.7;
+  line-height: var(--lh-base);
 }
 
 /* ------------------------------ toast ------------------------------ */
 
 .toast {
   position: absolute;
-  bottom: 20px;
+  bottom: var(--sp-5);
   left: 50%;
   transform: translateX(-50%);
-  padding: 8px 18px;
-  border-radius: 20px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  font-size: 12.5px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.18s;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-card);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-strong);
+  font-size: var(--fs-xs);
+  color: var(--ink);
 }
 </style>

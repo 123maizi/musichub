@@ -1,41 +1,217 @@
 /**
- * 全局样式
+ * 全局设计 token + 基础样式
  *
- * 视觉基调：编辑器式的克制暗色 —— 大量留白、细线分隔、单一强调色。
- * 所有颜色走 CSS 变量，切主题时只改变量即可。
+ * 这一层是「约束」，不是「样式」：所有颜色、字号、间距、圆角、时长都只能从这里取。
+ * 目的很直接 —— 组件里每写一个手写值（11.5px / 9px / 0.14s / #33333e），
+ * 界面就离「像生成的」近一步。审计脚本 scripts/design-audit.mjs 量的就是这件事。
+ *
+ * ── 视觉方向（一句话）──────────────────────────────────────────────
+ * **大理石与墨：欧洲古典的雕塑感 —— 暖白石膏底、墨色文字、0 圆角的石刻边界、
+ * 碑刻式衬线标题（疏排）、靠 1px 石灰线与大留白分层，不用任何投影。**
+ *
+ * 三条来源纪律：
+ *  · 层次靠「1px 石灰线 + 留白 + 字重对比」；**全站不用阴影**（纯白/暖白上投影会脏）。
+ *  · 雕刻感来自明暗对比：标题 600~700 配正文 400，反差要拉开；圆角归零。
+ *  · 动效是「重物落定」：缓出到底、位移极小、绝不弹跳。
+ *
+ * ── 命名 ──────────────────────────────────────────────────────────
+ * 新代码一律用新 token（--canvas / --ink-* / --sp-* / --fs-* / --dur-* / --font-*）；
+ * 末尾保留一组旧别名（--bg / --text / --line / --radius …）指向新 token，
+ * 8 个视图可以分批迁移而不至于一次改崩。
  */
+@import './styles/motion.css';
 
 :root {
-  --bg: #0b0b0f;
-  --bg-panel: #121217;
-  --bg-elev: #17171d;
-  --bg-hover: #1c1c24;
-  --line: #23232b;
-  --line-soft: #1a1a21;
+  /* ---------------------------------------------------------------- *
+   * 1. 画布与表面：暖白石膏。
+   *    注意画布不是纯白 —— 石膏与大理石都是暖的，纯白会发冷、丢掉古典感。
+   *    层级靠 1px 石灰线，不靠阴影。
+   * ---------------------------------------------------------------- */
+  --canvas: #f7f5f1;
+  --surface-1: #ffffff;
+  --surface-2: #fcfbf8;
+  --surface-3: #f1eee8; /* hover */
+  --surface-4: #e8e4dc; /* 选中 */
+  --hairline: #dad5cb; /* 石灰线：分割一切 */
+  --hairline-soft: #e8e4dc;
+  --hairline-strong: #c4bcae;
 
-  --text: #e9e9ec;
-  --text-dim: #8b8b96;
-  --text-faint: #5a5a66;
+  /* ---------------------------------------------------------------- *
+   * 2. 墨色：石刻的深是暖的，所以主文字不是纯黑。
+   *    分级按「能不能当正文」划：前三级都实测过 WCAG AA（≥4.5:1），
+   *    --ink-faint 只有 2.5:1，只能给图标/占位/装饰，**禁止写小字**。
+   *    验算：node scripts/design-token-check.mjs
+   * ---------------------------------------------------------------- */
+  --ink: #1c1a17; /* 主文字        15.9:1 */
+  --ink-muted: #6b655c; /* 次要文字       5.4:1 ✓ */
+  --ink-subtle: #736c62; /* 三级/说明      4.8:1 ✓ */
+  --ink-tertiary: var(--ink-subtle);
+  --ink-faint: #a39c90; /* 仅装饰         2.5:1 ✗ 小字禁用 */
 
-  --accent: #d4a24c;
-  --accent-soft: rgba(212, 162, 76, 0.12);
-  --danger: #d4574c;
-  --ok: #4ca86a;
+  /* ---------------------------------------------------------------- *
+   * 3. 强调色：**唯一待裁决项**，只在这 4 行里出现具体色值。
+   *    候选：氧化青铜金 #8A6B3F / 赤陶红 #A64B32 / Ins 蓝 #0095F6。
+   *    当前占位 = 氧化青铜金。改的时候只改 --accent 一行 ——
+   *    hover / soft / ring 都用 color-mix 从它派生，不会再散出第二处色值。
+   *    对比度（在 --canvas 上 / 白字压在它上面的按钮）：
+   *      青铜金 #8A6B3F → 4.57:1 ✓ / 4.98:1 ✓
+   *      赤陶红 #A64B32 → 5.29:1 ✓ / 5.76:1 ✓
+   *      Ins蓝  #0095F6 → 2.91:1 ✗ / 3.17:1 ✗（浅色古典底上既弱又显廉价，不建议）
+   * ---------------------------------------------------------------- */
+  --accent: #8a6b3f;
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #000000);
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --accent-ring: color-mix(in srgb, var(--accent) 38%, transparent);
+  --on-accent: #ffffff;
+
+  /* 语义色：成对给（text / soft / line），组件里不要再散写 #8fd3a4、rgba(...) */
+  --ok: #2f7d4f;
+  --ok-text: var(--ok);
+  --ok-soft: color-mix(in srgb, var(--ok) 10%, transparent);
+  --ok-line: color-mix(in srgb, var(--ok) 32%, transparent);
+  --danger: #a8342c;
+  --danger-text: var(--danger);
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, transparent);
+  --danger-line: color-mix(in srgb, var(--danger) 32%, transparent);
+
+  /* 进度：并入唯一强调色，不再有第二个强调色 */
+  --progress: var(--accent);
+  --progress-soft: var(--accent-soft);
 
   /**
-   * 进度条已播放段。
-   * 刻意不用强调色（金色）：金色在这里偏暗、和未播放段对比不够，
-   * 一眼看不出播到哪了；蓝色在暗底上更亮、更像「已经走过去的那一段」。
+   * 遮罩层（弹层 / 抽屉背后那层）。
+   * 用**暖墨色的低透明度**，不要用纯黑 rgba：大理石暖白底上纯黑会发脏发灰，
+   * 而 --ink 本身就是暖的（#1C1A17），压下去像「石刻的阴影」而不是「蒙了块黑布」。
    */
-  --progress: #3b82f6;
-  --progress-soft: rgba(59, 130, 246, 0.16);
+  --scrim: color-mix(in srgb, var(--ink) 28%, transparent);
 
-  --radius: 10px;
-  --radius-sm: 6px;
+  /* ---------------------------------------------------------------- *
+   * 4. 间距：4px 网格。只有这 8 档，不允许再出现 6/9/10/14/18px。
+   * ---------------------------------------------------------------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
 
-  --font: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system,
-    sans-serif;
-  --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+  /* ---------------------------------------------------------------- *
+   * 5. 字体与字号
+   *
+   * 「方正尖锐」的古典解法是**碑刻衬线 + 疏排 + 强字重对比**，不是装字体
+   * （包体刚砍掉一半，不再引入任何字体文件，只用系统字体栈）。
+   *   · 标题：衬线（Georgia / 宋体）+ 大写 + 拉宽字距（罗马碑刻是疏排的）
+   *   · 正文：无衬线（中文正文用衬线会累）
+   *   · 数字：衬线 + tabular-nums，时长/大小/进度有「刻度感」
+   *
+   * 字号 6 档，级差刻意拉开（1/2/3/6/8）—— 方正靠对比，不靠半像素。
+   * 原来的 9 / 11.5 / 12.5 / 13.5px 一律并入最近的档。
+   * ---------------------------------------------------------------- */
+  --font-display: Georgia, 'Times New Roman', 'Songti SC', 'SimSun', serif;
+  --font-body: 'Inter', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+  /* 旧名别名 */
+  --font: var(--font-body);
+  --mono: var(--font-mono);
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 15px;
+  --fs-md: 18px;
+  --fs-lg: 24px;
+  --fs-xl: 32px;
+
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  --lh-tight: 1.2;
+  --lh-base: 1.6;
+
+  --ls-display: 0.1em; /* 碑刻疏排：只给标题 */
+  --ls-tight: -0.01em;
+  --ls-normal: 0;
+  --ls-wide: 0.04em; /* 小标签/徽章 */
+
+  /* ---------------------------------------------------------------- *
+   * 6. 形状：石刻没有圆角。
+   *    控件最多 2px，容器 0；pill 只留给头像与圆形元素（结构例外）。
+   * ---------------------------------------------------------------- */
+  --r-ctl: 2px;
+  --r-card: 0px;
+  --r-pill: 999px;
+  /**
+   * 媒体缩略图专用圆角 —— 零圆角体系的**唯一例外**。
+   * 用户直接要求「缩略图的歌曲封面不要太方正，角圆滑一点」：
+   * 照片类元素（列表缩略图、专辑/单曲封面）用 6px 圆角更像照片/相纸，
+   * 而界面骨架（按钮、面板、输入、表格）仍然是 0~2px 的石刻边界。
+   * 艺人头像仍走 --r-pill（圆形），不适用这一档。
+   */
+  --r-media: 6px;
+
+  /* 全站不用阴影：层次交给石灰线 + 留白。
+     只保留焦点环 —— 那是可访问性要求，不是装饰。 */
+  --shadow-1: none;
+  --shadow-2: none;
+  --ring-focus: 0 0 0 2px var(--accent-ring);
+
+  /* ---------------------------------------------------------------- *
+   * 7. 动效：「有重量的丝滑」—— 缓出到底的落定感，不弹跳。
+   *    一套时长三档 + 一个主 easing，不允许再散落 0.12/0.14/0.18s。
+   *    只准动 transform / opacity（见 styles/motion.css）。
+   * ---------------------------------------------------------------- */
+  --dur-1: 240ms; /* 微交互：hover / 按下 / 颜色 */
+  --dur-2: 360ms; /* 进入：路由、行入场、弹层 */
+  --dur-3: 520ms; /* 大面：抽屉、长位移、进度填充 */
+  /* 同一套档位的别名，只允许这 3 档 */
+  --motion-fast: var(--dur-1);
+  --motion-base: var(--dur-2);
+  --motion-slow: var(--dur-3);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); /* 主 easing：落定 */
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  /* ---------------------------------------------------------------- *
+   * 8. 歌词行：行高固定 + 只允许 transform/颜色做强调。
+   *    活动行改 font-size / font-weight 会改变后续行的 offsetTop，
+   *    「滚动到当前行」就会抖。
+   * ---------------------------------------------------------------- */
+  --lyric-h: 36px;
+  --lyric-fs: var(--fs-base);
+
+  /* ---------------------------------------------------------------- *
+   * 9. 布局契约：外壳尺寸与版面留白。改这里一处即可。
+   *    --page-pad-x / --table-pad-x 不是间距刻度，是版面契约尺寸
+   *    （render-perf 按 7 列重排预演过：内容区 1136→1288px 后标题不再截断），
+   *    两者都落在 4px 网格上，审计不会记成离网值。
+   * ---------------------------------------------------------------- */
+  --rail-w: 64px; /* 极窄图标导航柱 */
+  --topbar-h: 48px; /* 压薄的顶栏 */
+  --column-rule: 1px; /* 通高刻线（导航与内容之间的分柱关系） */
+  --page-pad-x: 40px; /* 内容区左右留白 */
+  --table-pad-x: 36px; /* 表格内左右留白 */
+  --playerbar-h: 78px;
+  --sidebar-w: 208px; /* @deprecated 旧左栏宽度，改用 --rail-w */
+
+  /* ---------------------------------------------------------------- *
+   * 10. 旧别名：指向新 token，保证 8 个视图可以分批迁移。
+   *     新代码不要再用这一组。
+   * ---------------------------------------------------------------- */
+  --bg: var(--canvas);
+  --bg-panel: var(--surface-1);
+  --bg-elev: var(--surface-2);
+  --bg-hover: var(--surface-3);
+  --line: var(--hairline);
+  --line-soft: var(--hairline-soft);
+  --text: var(--ink);
+  --text-dim: var(--ink-muted);
+  /* 关键：旧 .faint 必须落到 AA 达标的那一档，而不是 --ink-faint（2.5:1） */
+  --text-faint: var(--ink-subtle);
+  --radius: var(--r-card);
+  --radius-sm: var(--r-ctl);
 }
 
 * {
@@ -49,15 +225,34 @@ body,
   margin: 0;
 }
 
+/**
+ * html 也要显式给字体族。
+ *
+ * 不给的话它吃浏览器默认族（本机是 Noto Sans SC），审计里就会多出第四个
+ * 「字体族」—— 没有任何组件 CSS 声明过它，扫全站只出现在 html/head/meta/script
+ * 这些非渲染节点上，很难查。这一行让全站字体族收敛为 display / body / mono 三个。
+ */
+html {
+  font-family: var(--font-body);
+}
+
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font);
-  font-size: 14px;
-  line-height: 1.6;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
   -webkit-font-smoothing: antialiased;
+  /* 暖白底上把数字统一成等宽衬线，读数更「刻度化」 */
+  font-variant-numeric: tabular-nums;
   overflow: hidden;
   user-select: none;
+}
+
+/* ------------------------------ 焦点 ------------------------------ */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
 }
 
 /* ------------------------------ 滚动条 ------------------------------ */
@@ -70,12 +265,12 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a33;
-  border-radius: 6px;
-  border: 2px solid var(--bg);
+  background: var(--hairline-strong);
+  border-radius: var(--r-pill);
+  border: 2px solid var(--canvas);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a3a46;
+  background: #a89f8f;
 }
 
 /* ------------------------------ 排版 ------------------------------ */
@@ -85,114 +280,160 @@ h2,
 h3,
 h4 {
   margin: 0;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  /* 碑刻衬线 + 大写 + 疏排：古典的「方正尖锐」就来自这三件事 */
+  font-family: var(--font-display);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--ls-display);
+  line-height: var(--lh-tight);
+  text-transform: uppercase;
+}
+
+h1 {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+}
+h2 {
+  font-size: var(--fs-lg);
+}
+h3 {
+  font-size: var(--fs-md);
 }
 
 a {
   color: var(--accent);
   text-decoration: none;
+  transition: color var(--dur-1) var(--ease-out);
 }
 a:hover {
+  color: var(--accent-hover);
   text-decoration: underline;
 }
 
-.mono {
-  font-family: var(--mono);
+/* 数字/时长/大小：衬线 + 等宽数字，读起来像刻度 */
+.mono,
+.num {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .dim {
-  color: var(--text-dim);
+  color: var(--ink-muted);
 }
 
 .faint {
-  color: var(--text-faint);
+  color: var(--ink-subtle);
+}
+
+/* 小标签：罗马碑刻的疏排感 */
+.eyebrow {
+  font-family: var(--font-display);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-display);
+  text-transform: uppercase;
+  color: var(--ink-subtle);
 }
 
 /* ------------------------------ 通用控件 ------------------------------ */
 
 button {
   font-family: inherit;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 6px 14px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl);
+  padding: var(--sp-2) var(--sp-3);
   cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  /* 只动颜色与 transform：颜色是绘制，transform 是合成，都不触发布局 */
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
   white-space: nowrap;
 }
 
 button:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: #33333e;
+  background: var(--surface-3);
+  border-color: var(--hairline-strong);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.985);
 }
 
 button:disabled {
-  opacity: 0.4;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #1a1408;
-  font-weight: 600;
+  color: var(--on-accent);
+  font-weight: var(--fw-semibold);
 }
 
 button.primary:hover:not(:disabled) {
-  background: #e0b05c;
-  border-color: #e0b05c;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 button.ghost {
   background: transparent;
   border-color: transparent;
-  color: var(--text-dim);
-  padding: 4px 10px;
+  color: var(--ink-muted);
+  padding: var(--sp-1) var(--sp-2);
 }
 
 button.ghost:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
 button.danger {
-  color: var(--danger);
-  border-color: rgba(212, 87, 76, 0.35);
+  color: var(--danger-text);
+  border-color: var(--danger-line);
 }
 
 button.danger:hover:not(:disabled) {
-  background: rgba(212, 87, 76, 0.12);
+  background: var(--danger-soft);
+  border-color: var(--danger);
 }
 
 input,
 select,
 textarea {
   font-family: inherit;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 7px 12px;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl);
+  padding: var(--sp-2) var(--sp-3);
   outline: none;
-  transition: border-color 0.12s;
+  transition:
+    border-color var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out);
 }
 
 input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--accent);
+  background: var(--surface-2);
 }
 
-input::placeholder {
-  color: var(--text-faint);
+input::placeholder,
+textarea::placeholder {
+  /* 占位符是装饰性文字，用 --ink-faint 合法（不承担阅读任务） */
+  color: var(--ink-faint);
 }
 
 textarea {
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   resize: vertical;
 }
 
@@ -201,8 +442,8 @@ select {
 }
 
 label {
-  font-size: 13px;
-  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
 }
 
 /* ------------------------------ 布局工具 ------------------------------ */
@@ -218,16 +459,16 @@ label {
 }
 
 .gap-4 {
-  gap: 4px;
+  gap: var(--sp-1);
 }
 .gap-8 {
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .gap-12 {
-  gap: 12px;
+  gap: var(--sp-3);
 }
 .gap-16 {
-  gap: 16px;
+  gap: var(--sp-4);
 }
 
 .grow {
@@ -243,16 +484,23 @@ label {
 
 .divider {
   height: 1px;
-  background: var(--line-soft);
-  margin: 16px 0;
+  background: var(--hairline);
+  margin: var(--sp-4) 0;
+}
+
+/* 柱式分割：通高 1px 竖线，用来切开版面（古典柱廊的做法） */
+.column-rule {
+  width: var(--column-rule);
+  align-self: stretch;
+  background: var(--hairline);
 }
 
 /* ------------------------------ 卡片 / 面板 ------------------------------ */
 
 .panel {
-  background: var(--bg-panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
 }
 
 .empty {
@@ -260,9 +508,9 @@ label {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 64px 24px;
-  color: var(--text-faint);
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-5);
+  color: var(--ink-subtle);
   text-align: center;
 }
 
@@ -271,41 +519,56 @@ label {
 .tag {
   display: inline-flex;
   align-items: center;
-  font-size: 11px;
-  font-family: var(--mono);
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 4px;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
-  background: var(--bg-elev);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  letter-spacing: var(--ls-wide);
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--hairline);
+  color: var(--ink-muted);
+  background: var(--surface-2);
 }
 
 .tag.ok {
-  color: var(--ok);
-  border-color: rgba(76, 168, 106, 0.3);
+  color: var(--ok-text);
+  border-color: var(--ok-line);
 }
 .tag.err {
-  color: var(--danger);
-  border-color: rgba(212, 87, 76, 0.3);
+  color: var(--danger-text);
+  border-color: var(--danger-line);
 }
 .tag.accent {
   color: var(--accent);
-  border-color: rgba(212, 162, 76, 0.3);
+  border-color: var(--accent-ring);
 }
 
 /* ------------------------------ 进度条 ------------------------------ */
 
 .bar {
   height: 3px;
-  background: var(--line);
-  border-radius: 2px;
+  background: var(--hairline);
+  border-radius: 0;
   overflow: hidden;
 }
 
+/**
+ * 进度填充。
+ *
+ * 约定见 styles/motion.css 的「进度类元素约定」一节：
+ * 用 `--p`（0~100 的纯数字）驱动 `transform: scaleX(calc(var(--p) / 100))`，
+ * **不要再用 width / left 驱动** —— 它们是布局属性，每次更新都要重算样式 + 重新布局。
+ * 团队实测：200 次进度更新会带来 +212 次 LayoutCount / +212 次 RecalcStyleCount。
+ *
+ * 兼容：`--p` 没设时退回 `--bar-value`（0~1，早期命名）；两者都没设 = 铺满，
+ * 所以老的 `<i :style="{width:x}">` 不会画错，只是没有平滑过渡。
+ * 迁移方式：`<i :style="{ '--p': percent }">` 并且去掉内联 width。
+ */
 .bar > i {
   display: block;
   height: 100%;
-  background: var(--accent);
-  transition: width 0.25s ease;
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(calc(var(--p, calc(var(--bar-value, 1) * 100)) / 100));
+  background: var(--progress);
+  transition: transform var(--dur-3) var(--ease-out);
 }

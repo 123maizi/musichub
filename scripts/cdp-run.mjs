@@ -49,6 +49,26 @@ const send = (method, params = {}) =>
 
 await send('Runtime.enable')
 
+/**
+ * 必须把窗口置前再驱动页面。
+ *
+ * 被遮挡/后台的窗口里 requestAnimationFrame 会被 Chrome 节流，而 Vue 的
+ * <Transition> 靠「双 rAF」推进 leave 流程：加 leave-from → 下一帧摘掉并加 leave-to。
+ * rAF 不来 → leave-from 一直挂着 → 属性值从未变化 → transitionend 永不到达
+ * → 配合 mode="out-in" 的路由过渡，RouterView 会永久卡死在新旧视图之间。
+ * 外部表现就是「hash 和顶栏标题都变了，内容区永远是上一个页面」。
+ *
+ * 我为此排查了很久：一度怀疑路由或过渡写错，直到量出卡住元素的
+ * opacity 仍是 1、类名里 leave-from 还挂着，才定位到是 rAF 被节流。
+ */
+try {
+  await send('Page.enable')
+  await send('Page.bringToFront')
+  await new Promise((r) => setTimeout(r, 400))
+} catch {
+  /* 某些目标没有 Page 域，忽略 */
+}
+
 const src = readFileSync(SCRIPT, 'utf8')
 const out = await send('Runtime.evaluate', {
   expression: `(async () => { ${src} })()`,

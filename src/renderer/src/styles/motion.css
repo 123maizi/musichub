@@ -1,0 +1,452 @@
+/**
+ * 动效层（motion）
+ *
+ * 团队约定，写在这里就是为了不用口头传达：
+ *
+ * 1. **只准动 `transform` 和 `opacity`。**
+ *    这两个属性在合成层解决，不触发布局也不触发重绘。
+ *    禁止在过渡/动画里改 width / height / top / left / margin / padding / font-size。
+ *    唯一的已评估例外：播放条与正在播放页的 4px 细轨道悬停变高（`.progress-rail` /
+ *    `.seek-rail`，用 `height`）。理由：元素极小（1324×4）、只在鼠标悬停时触发、
+ *    频率极低，改成 scaleY 会把圆角一起拉变形。design-audit 会把它列进「已评估例外」。
+ *
+ * 2. **一套时长 + 一套 easing**，全部来自 style.css 的 `--dur-1/2/3` 与
+ *    `--ease-out/in-out/in`。不要写字面量时长（0.14s 这种）。
+ *
+ * 3. **衔接要完整**：每个状态变化都要有 enter 和 leave，不允许「出现是硬的、消失是软的」。
+ *    下面每套过渡类都配齐了 enter-from / enter-active / enter-to / leave-*。
+ *
+ * 4. **必须能降级**：文件末尾的统一 `prefers-reduced-motion` 规则把所有动效压到不可察觉。
+ *    这是可访问性要求，也是 design-audit 的检查项之一。
+ *
+ * 可用的过渡类名（配 `<Transition name="...">` / `<TransitionGroup name="...">`）：
+ *   route      路由切换：淡入 + 6px 上浮，leave 更快（out-in）
+ *   xfade      纯淡入淡出：toast、遮罩、原地替换内容
+ *   rise       淡入 + 8px 上浮：卡片、提示条、空状态
+ *   pop        缩放 + 淡入：弹层、菜单、下拉（transform-origin 跟随锚点）
+ *   toast      淡入 + 上浮 + 轻微缩放（自带居中版 toast-center）
+ *   backdrop   遮罩层淡入
+ *   list       列表项增删（TransitionGroup）
+ * 纯 CSS 类（不需要 Vue）：
+ *   .stagger-in   子元素前 10 个依次入场（一次性，不与滚动耦合）
+ *   .u-rise-in    单个元素入场动画
+ *   .skeleton     骨架屏微光（transform 驱动，不重绘背景）
+ *   .img-fade     图片加载完成淡入
+ */
+
+/* ================================================================== *
+ * 1. 路由过渡
+ * ================================================================== */
+
+.route-enter-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+/*
+  路由入场：纯 CSS 动画，**不经过 Vue 的 <Transition>**。
+  原因见 App.vue 里那段注释：Vue 的过渡靠双 rAF 推进，隐藏窗口里 rAF 停摆会把
+  RouterView 卡死（旧视图退不掉、界面看起来「点导航没反应」）。
+  CSS 动画由浏览器合成器推进，不受 JS 的 rAF 影响，所以这条路上不可能卡死。
+*/
+@keyframes route-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.page > * {
+  animation: route-in var(--dur-2) var(--ease-out) both;
+}
+
+/* 旧的 route-* 过渡类保留：万一还有别处在用（如局部 <Transition name="route">）。
+   这里的相对定位/pointer-events 防御仍然有效。 */
+.route-leave-active {
+  /* 离开比进入快，用户等的是新页面，不是旧页面走完 */
+  transition:
+    opacity var(--dur-1) var(--ease-in),
+    transform var(--dur-1) var(--ease-in);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.route-enter-from {
+  /* 位移只有 4px：古典要的是「落定」，大位移会显得轻浮 */
+  opacity: 0;
+  transform: translate3d(0, 4px, 0);
+}
+.route-leave-to {
+  opacity: 0;
+  transform: translate3d(0, -2px, 0);
+}
+
+/* ================================================================== *
+ * 2. 通用过渡
+ * ================================================================== */
+
+.xfade-enter-active,
+.xfade-leave-active {
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+.xfade-enter-from,
+.xfade-leave-to {
+  opacity: 0;
+}
+
+.rise-enter-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+.rise-leave-active {
+  transition:
+    opacity var(--dur-1) var(--ease-in),
+    transform var(--dur-1) var(--ease-in);
+}
+.rise-enter-from {
+  opacity: 0;
+  transform: translate3d(0, 8px, 0);
+}
+.rise-leave-to {
+  opacity: 0;
+  transform: translate3d(0, 4px, 0);
+}
+
+/* 弹层：从锚点方向长出来，不是从中心炸开 */
+.pop-enter-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+  transform-origin: top center;
+}
+.pop-leave-active {
+  transition:
+    opacity var(--dur-1) var(--ease-in),
+    transform var(--dur-1) var(--ease-in);
+  transform-origin: top center;
+}
+.pop-enter-from,
+.pop-leave-to {
+  /* 缩放幅度压到 2%（规格：不超过 1.02）——弹层是「长出来」，不是「弹出来」 */
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+/* 只有完整元素在滚动容器里时才用 backdrop，别给整页加 */
+.backdrop-enter-active,
+.backdrop-leave-active {
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+.backdrop-enter-from,
+.backdrop-leave-to {
+  opacity: 0;
+}
+
+/* 列表增删（TransitionGroup） */
+.list-enter-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+.list-leave-active {
+  transition:
+    opacity var(--dur-1) var(--ease-in),
+    transform var(--dur-1) var(--ease-in);
+}
+.list-enter-from {
+  opacity: 0;
+  transform: translate3d(0, 6px, 0);
+}
+.list-leave-to {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
+}
+
+/* ================================================================== *
+ * 3. toast
+ *    普通版不带水平位移；居中版（left:50% 定位）必须带上 translateX(-50%)，
+ *    否则过渡一旦设置 transform，居中会瞬间失效、toast 会横向跳一下。
+ * ================================================================== */
+
+.toast-enter-active {
+  transition:
+    opacity var(--dur-3) var(--ease-out),
+    transform var(--dur-3) var(--ease-out);
+}
+.toast-leave-active {
+  transition:
+    opacity var(--dur-2) var(--ease-in),
+    transform var(--dur-2) var(--ease-in);
+}
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translate3d(0, 12px, 0) scale(0.98);
+}
+
+.toast-center-enter-active {
+  transition:
+    opacity var(--dur-3) var(--ease-out),
+    transform var(--dur-3) var(--ease-out);
+}
+.toast-center-leave-active {
+  transition:
+    opacity var(--dur-2) var(--ease-in),
+    transform var(--dur-2) var(--ease-in);
+}
+.toast-center-enter-from,
+.toast-center-leave-to {
+  opacity: 0;
+  transform: translate3d(-50%, 12px, 0) scale(0.98);
+}
+
+/* ================================================================== *
+ * 4. 一次性入场
+ * ================================================================== */
+
+@keyframes mh-rise-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.u-rise-in {
+  animation: mh-rise-in var(--dur-2) var(--ease-out) both;
+}
+
+/**
+ * 列表入场：只给前 12 个子元素，每个错开 34ms。
+ *
+ * 为什么只做 12 个（硬约束）：搜索结果一页 140 行，全做就是 140 段动画排队上屏，
+ * 既没有信息量又白烧合成资源。前 12 个足够表达「内容是从上往下出来的」，
+ * 而且总时长封顶在 34×11 + 360 ≈ 734ms，不会拖住阅读。
+ * 为什么用 CSS 而不是 JS + IntersectionObserver：需求是「一次性」，与滚动无关；
+ * 纯 CSS 不进主线程，也不会因为滚动反复触发。
+ *
+ * 用法：把 .stagger-in 加在包裹子元素的容器上（例如表格的 .body）。
+ */
+.stagger-in > *:nth-child(-n + 12) {
+  animation: mh-rise-in var(--dur-2) var(--ease-out) backwards;
+}
+.stagger-in > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.stagger-in > *:nth-child(2) {
+  animation-delay: 34ms;
+}
+.stagger-in > *:nth-child(3) {
+  animation-delay: 68ms;
+}
+.stagger-in > *:nth-child(4) {
+  animation-delay: 102ms;
+}
+.stagger-in > *:nth-child(5) {
+  animation-delay: 136ms;
+}
+.stagger-in > *:nth-child(6) {
+  animation-delay: 170ms;
+}
+.stagger-in > *:nth-child(7) {
+  animation-delay: 204ms;
+}
+.stagger-in > *:nth-child(8) {
+  animation-delay: 238ms;
+}
+.stagger-in > *:nth-child(9) {
+  animation-delay: 272ms;
+}
+.stagger-in > *:nth-child(10) {
+  animation-delay: 306ms;
+}
+.stagger-in > *:nth-child(11) {
+  animation-delay: 340ms;
+}
+.stagger-in > *:nth-child(12) {
+  animation-delay: 374ms;
+}
+
+/**
+ * 需要更精确控制时用这个变体：子元素上写 `:style="{ '--i': index }"`。
+ * 同样只建议前 12 个带 --i，后面的留空即不动画。
+ */
+.stagger-var > * {
+  animation-delay: calc(var(--i, 0) * 34ms);
+}
+.stagger-var > *[style*='--i'] {
+  animation: mh-rise-in var(--dur-2) var(--ease-out) backwards;
+}
+
+/* ================================================================== *
+ * 5. 骨架屏：微光用 transform 推，不改 background-position（那会重绘）
+ * ================================================================== */
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-radius: var(--r-ctl);
+  color: transparent;
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* 暖白底上用深色微光；浅色主题里的白色微光是看不见的 */
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(28, 26, 23, 0.05) 50%,
+    transparent 100%
+  );
+  transform: translate3d(-100%, 0, 0);
+  animation: mh-shimmer 1.6s var(--ease-in-out) infinite;
+}
+
+@keyframes mh-shimmer {
+  to {
+    transform: translate3d(100%, 0, 0);
+  }
+}
+
+/* ================================================================== *
+ * 6. 图片加载完成淡入（配合 CoverImage 这类组件）
+ * ================================================================== */
+
+.img-fade {
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+.img-fade.is-loaded {
+  opacity: 1;
+}
+
+/* ================================================================== *
+ * 7. 进度类元素约定（填充条 / 圆点 / 缓冲段）
+ *
+ * 全应用只允许一套写法，下载页、播放条、正在播放页都用它。
+ * 为什么必须统一：进度是全应用更新最频繁的视觉（下载进度 300ms 一次，
+ * 播放进度更高频）。用 width / left 驱动的话，每次更新都要重算样式 + 重新布局。
+ * 团队实测：200 次更新 → LayoutCount +212 / RecalcStyleCount +212（约 1.06 次/更新）。
+ *
+ * ── 变量约定（全局定死，不许各写一套）────────────────────────────
+ *   --p          0~100 的纯数字（**不是 0~1 小数**）。进度本体。默认 100 = 铺满。
+ *   --track-w    轨道像素宽度（number，不带单位），由 ResizeObserver 量出来写在容器上。
+ *                只有圆点需要它。
+ *                ⚠️ 不要与 style.css 里表示「导航柱宽度」的 --rail-w 混淆：
+ *                这两个语义撞过一次名（64px 的导航柱宽度被当成轨道宽度用，滑块会乱跑），
+ *                所以轨道宽度刻意叫 --track-w。
+ *   --knob-size  圆点直径（px），用于把圆点自身宽度补偿掉，默认 12px。
+ *
+ * ── 填充条 ────────────────────────────────────────────────────────
+ *   .fill {
+ *     width: 100%;                          // 常驻满宽，宽度不再变化
+ *     transform-origin: left center;         // 从左边长出来
+ *     transform: scaleX(calc(var(--p, 100) / 100));
+ *     transition: transform var(--dur-3) var(--ease-out);
+ *   }
+ *   模板：<i class="fill" :style="{ '--p': percent }"></i>
+ *   `.bar > i` 已按这套写好，下载页直接用 `<i :style="{ '--p': percent }">`。
+ *
+ * ── 圆点 ──────────────────────────────────────────────────────────
+ *   .knob {
+ *     position: absolute;
+ *     left: 0;
+ *     top: 50%;
+ *     margin-left: calc(var(--knob-size, 12px) / -2);   // 圆心对准进度点
+ *     transform: translate3d(calc(var(--p, 0) * var(--track-w, 0) * 1px / 100), -50%, 0);
+ *     transition: transform var(--dur-3) var(--ease-out);
+ *   }
+ *   ⚠️ 两个坑：
+ *     1) `--p` 和 `--track-w` 都是**无单位数字**，乘出来是数字不是长度，
+ *        translate3d 需要长度 —— 必须补 `* 1px`，否则整条 transform 被丢弃、圆点不动。
+ *     2) translate3d 里的 Y 必须带 `-50%`：圆点用 top:50% 定位，
+ *        一旦自己写了 transform，那个 50% 就没了，不加会垂直跳一下。
+ *
+ * ── 瞬断 / 拖动：关掉过渡，1:1 跟手 ───────────────────────────────
+ *   .snap        进度「跳」而不是「走」时用：换歌归零、循环归零、换源落位、续传清零
+ *   .dragging    用户拖动 / 点击轨道跳转时用
+ *   两个类都加在**容器**上即可（下面的子元素选择器会把内部过渡一起关掉），
+ *   组件里不许再各写 `transition: none`。
+ *
+ *   别名：`.no-motion` 等价于 `.snap`，`.seeking` 等价于 `.dragging`。
+ *   留别名不是偷懒 —— 这套命名在团队里来回改过三次，多两个选择器就能让
+ *   「按旧名写的组件」照常工作，不用再赌谁的记忆是对的。
+ * ================================================================== */
+
+.snap,
+.snap *,
+.dragging,
+.dragging *,
+.no-motion,
+.no-motion *,
+.seeking,
+.seeking *,
+.seeking .bar > i {
+  transition: none !important;
+}
+
+/* 拖动时抓手提亮一点（只动颜色，不动尺寸） */
+.dragging .progress-knob,
+.dragging .seek-knob,
+.seeking .progress-knob,
+.seeking .seek-knob {
+  background: var(--accent-bright);
+}
+
+/* ================================================================== *
+ * 8. 歌词行
+ *
+ * 行高固定，活动行只用 transform + 颜色做强调 —— **绝不用 font-size / font-weight**：
+ * 那会改变这一行（以及它后面所有行）的排版高度，offsetTop 一变，
+ * 「滚动到当前行」就会跳。scale 只影响绘制，不动布局盒。
+ * 用量：<div class="lyric-line" :class="{ 'is-active': active }">
+ * ================================================================== */
+
+.lyric-line {
+  display: flex;
+  align-items: center;
+  min-height: var(--lyric-h);
+  font-size: var(--lyric-fs);
+  color: var(--ink-tertiary);
+  transform-origin: left center;
+  transition:
+    color var(--dur-2) var(--ease-out),
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+
+.lyric-line.is-active {
+  color: var(--accent);
+  /* 只放大 2%（规格上限）；再大就有「弹跳感」，和雕塑感冲突 */
+  transform: scale(1.02);
+}
+
+/* ================================================================== *
+ * 9. 降级：系统开了「减少动态效果」就把一切压到不可察觉
+ *    全局兜底，**只在这里写一次**；组件不要各自实现一套
+ *    用 !important 是为了不依赖与组件样式的前后顺序（组件样式由 Vite 后注入）
+ * ================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}

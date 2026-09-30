@@ -45,6 +45,31 @@ const newName = ref('')
 const done = ref<{ name: string; count: number } | null>(null)
 const busy = ref(false)
 const inputEl = ref<HTMLInputElement | null>(null)
+const panelEl = ref<HTMLElement | null>(null)
+/** 面板是否向上展开（决定入场动画从哪一边长出来） */
+const above = ref(false)
+/**
+ * 正在播离场动效。
+ *
+ * 这个弹层由父级的 v-if 控制，直接 emit('close') 会被立刻摘掉 ——
+ * 那就只有入场没有离场（「出现是软的、消失是硬的」）。
+ * 所以先挂 .closing 播一段离场，再通知父级卸载。
+ */
+const closing = ref(false)
+
+/**
+ * 关掉面板：先播离场动效，再真正卸载。
+ * 时长直接从元素自身的 computed transition-duration 读，避免在 JS 里
+ * 再抄一份 token 值 —— 动效刻度只在 style.css 里定义一次。
+ */
+function requestClose(): void {
+  if (closing.value) return
+  closing.value = true
+  const el = panelEl.value
+  const raw = el ? getComputedStyle(el).transitionDuration.split(',')[0].trim() : ''
+  const ms = raw ? Number.parseFloat(raw) * (raw.endsWith('ms') ? 1 : 1000) : 0
+  window.setTimeout(() => emit('close'), ms > 0 ? Math.min(ms + 24, 400) : 0)
+}
 
 const count = computed(() => props.songs.length)
 
@@ -63,20 +88,22 @@ function place(): void {
   const rect = props.anchor?.getBoundingClientRect()
   if (!rect) {
     pos.value = { left: `${window.innerWidth - PANEL_WIDTH - 18}px`, bottom: '96px' }
+    above.value = true
     return
   }
   const left = Math.min(Math.max(8, rect.right - PANEL_WIDTH), window.innerWidth - PANEL_WIDTH - 8)
-  pos.value =
-    window.innerHeight - rect.bottom < MIN_SPACE_BELOW
-      ? { left: `${left}px`, bottom: `${Math.round(window.innerHeight - rect.top + GAP)}px` }
-      : { left: `${left}px`, top: `${Math.round(rect.bottom + GAP)}px` }
+  const toAbove = window.innerHeight - rect.bottom < MIN_SPACE_BELOW
+  above.value = toAbove
+  pos.value = toAbove
+    ? { left: `${left}px`, bottom: `${Math.round(window.innerHeight - rect.top + GAP)}px` }
+    : { left: `${left}px`, top: `${Math.round(rect.bottom + GAP)}px` }
 }
 
 /** 先在原地给个明确回执，再收起面板 —— 免得点完不知道成没成 */
 function flash(name: string, n: number): void {
   done.value = { name, count: n }
   emit('added', name, n)
-  window.setTimeout(() => emit('close'), 620)
+  window.setTimeout(requestClose, 620)
 }
 
 async function addTo(playlist: Playlist): Promise<void> {
@@ -108,7 +135,7 @@ async function createAndAdd(): Promise<void> {
 }
 
 function onKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape') emit('close')
+  if (event.key === 'Escape') requestClose()
 }
 
 onMounted(async () => {
@@ -129,51 +156,67 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <div class="backdrop" @click="emit('close')" @contextmenu.prevent></div>
+    <!-- 入场/离场都只动 opacity + transform（类定义在 styles/motion.css） -->
+    <Transition name="pop" appear>
+      <div
+        ref="panelEl"
+        class="panel"
+        :class="{ closing, above }"
+        :style="pos"
+        role="dialog"
+        aria-label="加入歌单"
+      >
+        <div class="head">
+          <span class="ttl ellipsis">{{ title }}</span>
+          <button class="ghost tiny" title="关闭" @click="requestClose">
+            <AppIcon name="close" :size="11" />
+          </button>
+        </div>
 
-    <div class="panel" :style="pos" role="dialog" aria-label="加入歌单">
-      <div class="head">
-        <span class="ttl ellipsis">{{ title }}</span>
-        <button class="ghost tiny" title="关闭" @click="emit('close')">
-          <AppIcon name="close" :size="11" />
-        </button>
-      </div>
+        <div class="new">
+          <input
+            ref="inputEl"
+            v-model="newName"
+            placeholder="新建歌单并加入…"
+            spellcheck="false"
+            @keyup.enter="createAndAdd"
+          />
+          <button class="ghost small" :disabled="!newName.trim() || busy" @click="createAndAdd">
+            创建
+          </button>
+        </div>
 
-      <div class="new">
-        <input
-          ref="inputEl"
-          v-model="newName"
-          placeholder="新建歌单并加入…"
-          spellcheck="false"
-          @keyup.enter="createAndAdd"
-        />
-        <button class="ghost small" :disabled="!newName.trim() || busy" @click="createAndAdd">
-          创建
-        </button>
-      </div>
+        <div class="pls">
+          <button
+            v-for="p in ordered"
+            :key="p.id"
+            class="pl"
+            :class="{ done: done?.name === p.name }"
+            :disabled="busy"
+            :title="insideCount(p) > 0 ? `「${p.name}」里已有 ${insideCount(p)} 首` : `加入「${p.name}」`"
+            @click="addTo(p)"
+          >
+            <AppIcon name="playlist" :size="13" />
+            <span class="nm ellipsis">{{ p.name }}</span>
+            <span v-if="insideCount(p) === count" class="in">已在</span>
+            <span v-else-if="insideCount(p) > 0" class="in">+{{ count - insideCount(p) }}</span>
+            <span class="ct mono">{{ p.songs.length }}</span>
+          </button>
 
-      <div class="pls">
-        <button
-          v-for="p in ordered"
-          :key="p.id"
-          class="pl"
-          :class="{ done: done?.name === p.name }"
-          :disabled="busy"
-          :title="insideCount(p) > 0 ? `「${p.name}」里已有 ${insideCount(p)} 首` : `加入「${p.name}」`"
-          @click="addTo(p)"
-        >
-          <AppIcon name="playlist" :size="13" />
-          <span class="nm ellipsis">{{ p.name }}</span>
-          <span v-if="insideCount(p) === count" class="in">已在</span>
-          <span v-else-if="insideCount(p) > 0" class="in">+{{ count - insideCount(p) }}</span>
-          <span class="ct mono">{{ p.songs.length }}</span>
-        </button>
-
-        <div v-if="library.playlists.length === 0" class="none faint">
-          还没有歌单<br />在上面输入名字，回车即可创建并加入
+          <div v-if="library.playlists.length === 0" class="none faint">
+            还没有歌单<br />在上面输入名字，回车即可创建并加入
+          </div>
         </div>
       </div>
-    </div>
+    </Transition>
+
+    <!--
+      点击空白处关闭。遮罩底色走 --scrim（契约新增），淡入由 motion.css 的 backdrop 类负责；
+      它只做两件事：吃掉点击 + 轻微压暗，不参与任何布局动画。
+    -->
+    <Transition name="backdrop" appear>
+      <div class="backdrop" @click="requestClose" @contextmenu.prevent></div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -182,6 +225,8 @@ onBeforeUnmount(() => {
   position: fixed;
   inset: 0;
   z-index: 70;
+  /* 契约新增的遮罩色；只做压暗，淡入交给 .backdrop-enter-* */
+  background: var(--scrim);
 }
 
 .panel {
@@ -191,102 +236,128 @@ onBeforeUnmount(() => {
   max-height: 300px;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.55);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  /* 零阴影体系：层次靠刻线，不靠浮起 */
+  box-shadow: var(--shadow-2);
   overflow: hidden;
+  /**
+   * 入场/离场只动 opacity + transform。
+   * 入场由 motion.css 的 .pop-* 负责（<Transition name="pop" appear>）；
+   * 这里的 transition 是为离场服务的：父级用 v-if 控制本组件，直接 emit('close')
+   * 会被立刻摘掉、看不到 leave，所以关闭时先挂 .closing 播完再卸载。
+   */
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+
+/* 面板向上展开时从底边长出来，别从顶边「翻下来」 */
+.panel.above {
+  transform-origin: bottom center;
+}
+
+.panel.closing {
+  opacity: 0;
+  transform: scale(0.96);
 }
 
 .head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 8px 8px 12px;
-  border-bottom: 1px solid var(--line-soft);
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--hairline-soft);
 }
 
 .ttl {
   flex: 1;
   min-width: 0;
-  font-size: 11.5px;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-wide);
+  color: var(--ink-muted);
 }
 
 .tiny {
-  padding: 3px 6px;
+  padding: var(--sp-1) var(--sp-2);
   line-height: 1;
 }
 
 .new {
   display: flex;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line-soft);
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--hairline-soft);
 }
 
 .new input {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
-  padding: 5px 9px;
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-2);
 }
 
 .new .small {
-  padding: 5px 10px;
-  font-size: 12px;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
 }
 
 .pls {
   overflow-y: auto;
-  padding: 6px;
+  padding: var(--sp-2);
 }
 
 .pl {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   width: 100%;
-  padding: 7px 9px;
+  padding: var(--sp-2) var(--sp-3);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-ctl);
   background: transparent;
-  color: var(--text);
+  color: var(--ink);
   text-align: left;
   cursor: pointer;
+  /* 只动颜色与 transform（合成层），不动尺寸 */
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
 }
 
 .pl:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--surface-3);
+  transform: translateX(var(--sp-1));
 }
 
 /* 刚加入成功的那一行给个绿色的确定态 */
 .pl.done {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 
 .nm {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 .ct {
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
 }
 
 .in {
-  font-size: 10.5px;
-  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
   flex: none;
 }
 
 .none {
-  padding: 14px 10px;
-  font-size: 12px;
-  line-height: 1.7;
+  padding: var(--sp-4) var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
   text-align: center;
+  color: var(--ink-subtle);
 }
 </style>

@@ -111,13 +111,17 @@ async function downloadSong(song: Song): Promise<void> {
 
 <template>
   <section class="view">
-    <header class="bar">
-      <button class="icon-btn" title="返回" @click="router.back()">
-        <AppIcon name="back" :size="18" />
+    <!-- 页面标题由外壳顶栏渲染；播放/下载这两个页面级动作注入顶栏右侧 -->
+    <Teleport to="#page-actions">
+      <button class="primary small" :disabled="songs.length === 0" @click="playAll">
+        <AppIcon name="play" :size="14" />
+        <span>播放全部</span>
       </button>
-      <div class="grow"></div>
-      <span v-if="songs.length > 0" class="faint small-text">{{ songs.length }} 首</span>
-    </header>
+      <button class="ghost small" :disabled="songs.length === 0" @click="downloadAll">
+        <AppIcon name="download" :size="14" />
+        <span>下载全部</span>
+      </button>
+    </Teleport>
 
     <div v-if="albumName" class="hero">
       <div class="cover-wrap">
@@ -125,24 +129,26 @@ async function downloadSong(song: Song): Promise<void> {
       </div>
 
       <div class="info">
-        <div class="kicker">专辑</div>
+        <div class="kicker eyebrow">专辑</div>
         <h1 class="ellipsis" :title="albumName">{{ albumName }}</h1>
         <div class="meta">
           <span v-if="singer">{{ singer }}</span>
           <span v-if="platformLabel" class="tag">{{ platformLabel }}</span>
+          <span v-if="songs.length > 0" class="faint">{{ songs.length }} 首</span>
         </div>
 
         <div class="actions">
-          <button class="primary" :disabled="songs.length === 0" @click="playAll">
-            <AppIcon name="play" :size="14" />
-            <span>播放全部</span>
-          </button>
-          <button :disabled="songs.length === 0" @click="downloadAll">
-            <AppIcon name="download" :size="14" />
-            <span>下载全部</span>
+          <button class="ghost small" title="返回上一页" @click="router.back()">
+            <AppIcon name="back" :size="14" />
+            <span>返回</span>
           </button>
         </div>
       </div>
+    </div>
+
+    <div v-else class="empty">
+      <span>还没有选择专辑</span>
+      <button class="ghost small" @click="router.push('/search')">去搜索</button>
     </div>
 
     <div v-if="error" class="notice err">
@@ -161,7 +167,7 @@ async function downloadSong(song: Song): Promise<void> {
       />
     </div>
 
-    <Transition name="fade">
+    <Transition name="toast-center">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
   </section>
@@ -176,99 +182,65 @@ async function downloadSong(song: Song): Promise<void> {
   position: relative;
 }
 
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.icon-btn {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
-}
-
-.icon-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.small-text {
-  font-size: 11.5px;
-}
-
 /* ------------------------------ 专辑信息 ------------------------------ */
 
 .hero {
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 26px 24px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--sp-5);
+  padding: var(--sp-5) 0;
+  border-bottom: 1px solid var(--hairline);
 }
 
+/* 石刻：零圆角、零阴影，靠 1px 刻线围出封面 */
 .cover-wrap {
   flex: none;
   width: 132px;
   height: 132px;
-  border-radius: 12px;
+  border-radius: var(--r-card);
   overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
   display: grid;
   place-items: center;
-  color: var(--text-faint);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
+  color: var(--ink-subtle);
 }
 
 .info {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
+/* 碑刻小标签：全局 .eyebrow 负责衬线/大写/疏排，这里只给强调色 */
 .kicker {
-  font-size: 11px;
-  letter-spacing: 0.18em;
   color: var(--accent);
 }
 
 .info h1 {
-  font-size: 25px;
-  font-weight: 600;
-  line-height: 1.2;
+  font-size: var(--fs-lg);
 }
 
 .meta {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 12.5px;
-  color: var(--text-dim);
+  gap: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-muted);
   flex-wrap: wrap;
 }
 
 .actions {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
 }
 
 .actions button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  border-radius: 18px;
-  padding: 7px 16px;
+  gap: var(--sp-1);
 }
 
 /* ------------------------------ 曲目 ------------------------------ */
@@ -278,7 +250,7 @@ async function downloadSong(song: Song): Promise<void> {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 8px 4px 0;
+  padding: var(--sp-2) 0 0;
   overflow: hidden;
 }
 
@@ -287,37 +259,28 @@ async function downloadSong(song: Song): Promise<void> {
 }
 
 .notice {
-  margin: 10px 18px 0;
-  padding: 9px 14px;
-  font-size: 12.5px;
-  border-radius: var(--radius-sm);
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-card);
 }
 
 .notice.err {
-  border: 1px solid rgba(212, 87, 76, 0.3);
-  background: rgba(212, 87, 76, 0.08);
-  color: #e79a92;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
 }
 
 .toast {
   position: absolute;
-  bottom: 20px;
+  bottom: var(--sp-5);
   left: 50%;
   transform: translateX(-50%);
-  padding: 8px 18px;
-  border-radius: 20px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  font-size: 12.5px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.18s;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-card);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-strong);
+  font-size: var(--fs-xs);
+  color: var(--ink);
 }
 </style>

@@ -180,11 +180,35 @@ async function downloadSelected(): Promise<void> {
 
         <div class="grow"></div>
 
-        <template v-if="mode === 'song'">
-          <span v-if="search.totalCount > 0" class="faint small-text">
-            共 {{ search.totalCount }} 条 · 耗时 {{ search.cost }}ms
-          </span>
+        <!--
+          结果条数留在工具条里（属于当前筛选上下文）；
+          页面级动作只有「多选 / 全部下载」两个，通过 Teleport 注入外壳顶栏右侧。
+          下载格式退回内容区：它是「下载之前先选好」的前置设置，属工具条语境，
+          放在顶栏会把极简的顶栏挤成一排控件。
+        -->
+        <span v-if="mode === 'song' && search.totalCount > 0" class="faint small-text">
+          共 {{ search.totalCount }} 条 · 耗时 {{ search.cost }}ms
+        </span>
+        <span v-else-if="mode === 'artist' && artistStore.total > 0" class="faint small-text">
+          {{ artistStore.total }} 位艺人 · 耗时 {{ artistStore.cost }}ms
+        </span>
+        <span v-else-if="mode === 'album' && albumStore.total > 0" class="faint small-text">
+          {{ albumStore.total }} 张专辑 · 耗时 {{ albumStore.cost }}ms
+        </span>
 
+        <div v-if="mode === 'song'" class="fmt-inline" title="点 ↓ 下载时用这个格式">
+          <span class="faint small-text">下载格式</span>
+          <DownloadFormatPicker
+            compact
+            :model-value="downloads.config?.preferQuality"
+            :disabled="!downloads.config"
+            @update:model-value="downloads.setFormat"
+          />
+        </div>
+      </div>
+
+      <Teleport to="#page-actions">
+        <template v-if="mode === 'song'">
           <button
             :class="selectMode ? 'primary small' : 'ghost small'"
             :disabled="search.totalCount === 0"
@@ -208,31 +232,8 @@ async function downloadSelected(): Promise<void> {
           >
             全部下载
           </button>
-
-          <!-- 下载格式：摆在这里才能「先选格式，再点下载」 -->
-          <div class="fmt-inline" title="点 ↓ 下载时用这个格式">
-            <span class="faint small-text">下载格式</span>
-            <DownloadFormatPicker
-              compact
-              :model-value="downloads.config?.preferQuality"
-              :disabled="!downloads.config"
-              @update:model-value="downloads.setFormat"
-            />
-          </div>
         </template>
-
-        <template v-else-if="mode === 'artist'">
-          <span v-if="artistStore.total > 0" class="faint small-text">
-            {{ artistStore.total }} 位艺人 · 耗时 {{ artistStore.cost }}ms
-          </span>
-        </template>
-
-        <template v-else>
-          <span v-if="albumStore.total > 0" class="faint small-text">
-            {{ albumStore.total }} 张专辑 · 耗时 {{ albumStore.cost }}ms
-          </span>
-        </template>
-      </div>
+      </Teleport>
 
       <!-- 平台筛选 -->
       <div v-if="search.platformTabs.length > 0" class="tabs">
@@ -351,21 +352,26 @@ async function downloadSelected(): Promise<void> {
     </div>
 
     <!-- 分页 -->
+    <!--
+      分页行：压到 40px 以内，紧贴列表末尾。
+      「回到首页」降级为次要文字链接（它的功能等价于在搜索框里再按一次搜索，
+      page 会复位到 1），所以不需要占一个按钮位；功能本身一个没少。
+    -->
     <footer v-if="search.totalCount > 0" class="pager">
       <button
-        class="ghost small"
+        class="pager-link"
         :disabled="search.loading || search.page <= 1"
         @click="search.page = 1; search.search()"
       >
         回到首页
       </button>
-      <span class="faint small-text mono">第 {{ search.page }} 页</span>
+      <span class="faint mono">第 {{ search.page }} 页</span>
       <button class="ghost small" :disabled="search.loading" @click="search.nextPage()">
         加载更多
       </button>
     </footer>
 
-    <Transition name="fade">
+    <Transition name="toast-center">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
   </section>
@@ -380,46 +386,54 @@ async function downloadSelected(): Promise<void> {
   position: relative;
 }
 
+/* 左右留白由外壳 .page 负责（--page-pad-x），视图不再自加，否则会叠成 80px */
 .header {
-  padding: 18px 18px 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--sp-3);
 }
 
 .search-box {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .search-box input {
   flex: 1;
-  font-size: 14px;
-  padding: 10px 14px;
+  font-size: var(--fs-base);
+  padding: var(--sp-2) var(--sp-3);
 }
 
 .search-box button {
-  padding: 0 22px;
+  padding: 0 var(--sp-5);
 }
 
 .meta-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
+/* 分段控件：石刻语言用 1px 刻线分格，不用圆角胶囊 */
 .channels {
   display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  gap: 0;
+  padding: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
 }
 
 .channels .ghost {
-  border-radius: 4px;
-  padding: 4px 10px;
+  border-radius: 0;
+  border-color: transparent;
+  padding: var(--sp-1) var(--sp-3);
+}
+
+.channels .ghost + .ghost {
+  border-left: 1px solid var(--hairline);
 }
 
 .channels .ghost.active {
@@ -428,56 +442,76 @@ async function downloadSelected(): Promise<void> {
 }
 
 .small-text {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 /* 搜索页工具条里的下载格式选择：先选格式，再点 ↓ */
 .fmt-inline {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-left: 4px;
+  gap: var(--sp-2);
+  margin-left: var(--sp-1);
 }
 
 /* ------------------------------ 平台标签 ------------------------------ */
 
 .tabs {
   display: flex;
-  gap: 4px;
+  gap: var(--sp-1);
   flex-wrap: wrap;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--hairline);
 }
 
+/* 当前平台用 2px 下刻线标记（与导航柱同一个语言），不做滑动胶囊 */
 .tab {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-1);
   background: transparent;
   border: 1px solid transparent;
-  color: var(--text-dim);
-  padding: 5px 11px;
-  font-size: 12px;
+  border-radius: 0;
+  color: var(--ink-muted);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+}
+
+.tab::after {
+  content: '';
+  position: absolute;
+  left: var(--sp-3);
+  right: var(--sp-3);
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform var(--dur-2) var(--ease-out);
 }
 
 .tab:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
 .tab.active {
-  background: var(--accent-soft);
-  border-color: rgba(212, 162, 76, 0.3);
-  color: var(--accent);
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.tab.active::after {
+  transform: scaleX(1);
 }
 
 .tab.failed {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .tab .mono {
-  font-size: 11px;
-  opacity: 0.7;
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
 }
 
 /* ------------------------------ 提示 ------------------------------ */
@@ -486,26 +520,26 @@ async function downloadSelected(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin: 12px 18px 0;
-  padding: 9px 14px;
-  font-size: 12.5px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-panel);
-  color: var(--text-dim);
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-card);
+  border: 1px solid var(--hairline);
+  background: var(--surface-1);
+  color: var(--ink-muted);
 }
 
 .notice.warn {
-  border-color: rgba(212, 162, 76, 0.3);
+  border-color: var(--accent-ring);
   background: var(--accent-soft);
-  color: #e0bd7a;
+  color: var(--accent);
 }
 
 .notice.err {
-  border-color: rgba(212, 87, 76, 0.3);
-  background: rgba(212, 87, 76, 0.08);
-  color: #e79a92;
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
 }
 
 /* ------------------------------ 结果 ------------------------------ */
@@ -515,7 +549,7 @@ async function downloadSelected(): Promise<void> {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px 4px 0;
+  padding: var(--sp-3) 0 0;
   overflow: hidden;
 }
 
@@ -529,33 +563,57 @@ async function downloadSelected(): Promise<void> {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 14px 24px;
+  padding: var(--sp-4) 0 var(--sp-6);
 }
 
 .artist-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-  gap: 14px;
+  gap: var(--sp-4);
 }
 
 .artist-card {
+  position: relative;
+  z-index: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 18px 10px 14px;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-3) var(--sp-5);
   font-family: inherit;
   color: inherit;
-  background: var(--bg-panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
   cursor: pointer;
-  transition: background 0.14s, border-color 0.14s, transform 0.1s;
+  /*
+   * 卡片 hover 底色改由覆盖层承担：过渡里只剩 border-color（1px 周长，绘制量极小）
+   * 与 transform（合成）。原来那版 `transition: background` 每次 hover 都要重绘
+   * 整张卡片面积，一屏几十张卡时是白给的开销。
+   */
+  transition:
+    border-color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.artist-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-color: var(--surface-3);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out);
+  pointer-events: none;
+}
+
+.artist-card:hover::before {
+  opacity: 1;
 }
 
 .artist-card:hover {
-  background: var(--bg-hover);
-  border-color: #33333e;
+  border-color: var(--hairline-strong);
 }
 
 .artist-card:active {
@@ -567,71 +625,92 @@ async function downloadSelected(): Promise<void> {
   height: 76px;
   border-radius: 50%;
   overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
   display: grid;
   place-items: center;
-  color: var(--text-faint);
+  color: var(--ink-subtle);
 }
 
-/* 专辑封面用方形，与艺人的圆形一眼区分开 */
+/* 专辑封面用方形，与艺人的圆形一眼区分开；石刻没有圆角 */
 .album-cover {
   width: 76px;
   height: 76px;
-  border-radius: 8px;
+  border-radius: var(--r-card);
   overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
   display: grid;
   place-items: center;
-  color: var(--text-faint);
+  color: var(--ink-subtle);
 }
 
 .artist-name {
   max-width: 100%;
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--ink);
 }
 
 .artist-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--ink-muted);
 }
 
+/*
+ * 分页行：目标 —— 整行含留白 ≤ 40px，紧贴列表末尾。
+ * 之前是 padding 12px 上下 + 居中大间距，整块 ~55px 且留白发散，
+ * 视觉上像一块独立的空白区、把列表截断了。
+ */
 .pager {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 14px;
-  padding: 10px;
-  border-top: 1px solid var(--line-soft);
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0;
+  border-top: 1px solid var(--hairline-soft);
+  font-size: var(--fs-xs);
+}
+
+/* 两个按钮统一 28px 高：≥24px 命中区，同时把整行压在 40px 内 */
+.pager button {
+  min-height: 28px;
+  padding: 0 var(--sp-2);
+}
+
+/* 「回到首页」降级成文字链接：仍然可点、可达，但不再占按钮位 */
+.pager-link {
+  background: transparent;
+  border: none;
+  color: var(--ink-muted);
+  font-size: var(--fs-xs);
+  min-height: 24px;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pager-link:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink);
 }
 
 /* ------------------------------ toast ------------------------------ */
 
 .toast {
   position: absolute;
-  bottom: 20px;
+  bottom: var(--sp-5);
   left: 50%;
   transform: translateX(-50%);
-  padding: 8px 18px;
-  border-radius: 20px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  font-size: 12.5px;
-  color: var(--text);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.18s;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-card);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline-strong);
+  font-size: var(--fs-xs);
+  color: var(--ink);
 }
 </style>

@@ -5,7 +5,7 @@
  * 大封面 + 滚动歌词。所有图标用内联 SVG（见 AppIcon），
  * 刻意不用 ⏮ ▶ ⏭ 这类符号 —— 它们在 Windows 上会被渲染成彩色 emoji 方块。
  */
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { PLATFORM_META, QUALITY_META } from '@shared/constants'
@@ -29,6 +29,43 @@ const lyricBox = ref<HTMLElement | null>(null)
 const toast = ref<string | null>(null)
 const seeking = ref(false)
 const seekValue = ref(0)
+
+/**
+ * 轨道像素宽度（不带单位的数字，契约里只有圆点需要）。
+ * 圆点以前写 `left: ${progress}%` —— 布局属性，每次进度更新都要重排；
+ * 现在改由 `translate3d(calc(--p × --track-w × 1px / 100), …)` 走合成层。
+ */
+const railEl = ref<HTMLElement | null>(null)
+const railWidth = ref(0)
+let railObserver: ResizeObserver | null = null
+
+/**
+ * 进度「跳」而不是「走」的当帧关掉过渡（容器挂 .no-motion）：
+ * 换歌归零、单曲循环归零、往回拖、换源落位夹到新流末尾。
+ * 判据只有「这一帧的值比上一帧小」，下一次前进/相等的值到来时自动恢复。
+ */
+const noMotion = ref(false)
+watch(
+  () => player.progress,
+  (next, prev) => {
+    noMotion.value = next + 0.01 < prev
+  }
+)
+
+onMounted(() => {
+  const el = railEl.value
+  if (!el) return
+  railWidth.value = el.clientWidth
+  railObserver = new ResizeObserver(() => {
+    railWidth.value = el.clientWidth
+  })
+  railObserver.observe(el)
+})
+
+onBeforeUnmount(() => {
+  railObserver?.disconnect()
+  railObserver = null
+})
 
 /** 播放模式 → 图标名 */
 const MODE_ICON = {
@@ -199,6 +236,31 @@ const displayProgress = computed(() =>
   seeking.value ? seekValue.value : player.progress
 )
 
+/**
+ * 原生 range 的 value 只在「需要当基准」时才同步，且必须绑字符串 +
+ * 与 step 对齐的精度（range 会按 step 把 value 对齐，绑未对齐的数字会导致
+ * 每次重渲染都写一次 value，从而重排输入框内部影子树：实测 1.02 次布局/更新）。
+ * 拖动时不能写它，否则会把用户拖到一半的值打回去。
+ */
+const seekBase = ref(0)
+let lastSeekSync = 0
+watch(
+  () => player.progress,
+  (next, prev) => {
+    const jumpedBack = next + 0.5 < (prev ?? 0)
+    const now = Date.now()
+    if (!jumpedBack && player.playing && now - lastSeekSync < 1000) return
+    lastSeekSync = now
+    seekBase.value = next
+  },
+  { immediate: true }
+)
+
+/** 实际绑给 range 的值：拖动中跟随手指，平时用低频基准（精度与 step 对齐） */
+const seekInputProp = computed(() =>
+  String(Math.round((seeking.value ? seekValue.value : seekBase.value) * 10) / 10)
+)
+
 const displayTime = computed(() =>
   seeking.value && player.duration > 0
     ? (seekValue.value / 100) * player.duration
@@ -307,28 +369,47 @@ async function saveCover(): Promise<void> {
 
 <template>
   <section class="view">
-    <header class="bar">
+    <!--
+      页面级操作注入外壳顶栏右侧（App.vue 的 #page-actions）。
+      标题由外壳读 route.meta.title 渲染，视图自己不再画 header ——
+      否则会出现「顶栏标题 + 视图标题」两份。
+    -->
+    <Teleport to="#page-actions">
       <button class="icon-btn" title="返回" @click="router.back()">
-        <AppIcon name="back" :size="18" />
+        <AppIcon name="back" :size="16" />
       </button>
-      <div class="grow"></div>
-      <span v-if="player.urlInfo" class="tag accent" :title="`由音源「${player.urlInfo.sourceName}」提供`">
+      <span
+        v-if="player.urlInfo"
+        class="tag accent"
+        :title="`由音源「${player.urlInfo.sourceName}」提供`"
+      >
         {{ qualityLabel }}
       </span>
-      <span v-if="player.urlInfo" class="faint src-name ellipsis">{{ player.urlInfo.sourceName }}</span>
-    </header>
+      <span v-if="player.urlInfo" class="faint src-name ellipsis">
+        {{ player.urlInfo.sourceName }}
+      </span>
+    </Teleport>
 
     <div class="stage">
       <!-- 左：封面与控制 -->
       <div class="left">
         <div class="cover">
-          <CoverImage
-            :src="bigCover"
-            :song="player.current ?? undefined"
-            :icon-size="56"
-            prefer-resolved
-            fallback
-          />
+          <!--
+            交叉淡入：以歌曲 id 为 key，换歌时新旧两层同帧交叉（不加 mode）。
+            包一层 .cover-layer 是因为 CoverImage 是 v-if/v-else 的双根片段组件，
+            而 <Transition> 要求单一元素子节点。
+          -->
+          <Transition name="xfade">
+            <div class="cover-layer" :key="player.current?.id ?? 'none'">
+              <CoverImage
+                :src="bigCover"
+                :song="player.current ?? undefined"
+                :icon-size="56"
+                prefer-resolved
+                fallback
+              />
+            </div>
+          </Transition>
         </div>
 
         <div class="meta">
@@ -384,13 +465,17 @@ async function saveCover(): Promise<void> {
           </button>
         </div>
 
-        <!-- 进度：与底部播放条保持同一套观感（已播放段蓝色） -->
+        <!-- 进度：与底部播放条共用一套写法（--p 变量 + transform，不再用 width/left 驱动） -->
         <div class="progress-row">
           <span class="time mono">{{ formatTime(displayTime) }}</span>
-          <div class="seek-wrap" :class="{ seeking }">
-            <div class="seek-rail">
-              <div class="seek-fill" :style="{ width: `${displayProgress}%` }"></div>
-              <div class="seek-knob" :style="{ left: `${displayProgress}%` }"></div>
+          <div class="seek-wrap" :class="{ seeking, 'no-motion': noMotion }">
+            <div
+              class="seek-rail"
+              ref="railEl"
+              :style="{ '--p': displayProgress, '--track-w': railWidth }"
+            >
+              <div class="seek-fill"></div>
+              <div class="seek-knob"></div>
             </div>
             <input
               class="seek"
@@ -398,7 +483,7 @@ async function saveCover(): Promise<void> {
               min="0"
               max="100"
               step="0.1"
-              :value="displayProgress"
+              :value="seekInputProp"
               :disabled="!player.current || player.duration <= 0"
               aria-label="播放进度"
               @input="onSeekInput"
@@ -507,7 +592,7 @@ async function saveCover(): Promise<void> {
             v-for="(line, index) in player.lyricLines"
             :key="index"
             class="lyric-line"
-            :class="{ active: index === player.currentLyricIndex }"
+            :class="{ 'is-active': index === player.currentLyricIndex }"
             :data-line="index"
             @click="player.seek(line.time)"
           >
@@ -526,7 +611,8 @@ async function saveCover(): Promise<void> {
       <button class="ghost small" @click="player.error = null">知道了</button>
     </div>
 
-    <Transition name="fade">
+    <!-- 居中 toast：用 motion.css 的 toast-center（自带 translateX(-50%) 的居中补偿） -->
+    <Transition name="toast-center">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
 
@@ -552,74 +638,100 @@ async function saveCover(): Promise<void> {
 
 /* ------------------------------ 顶栏 ------------------------------ */
 
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--line-soft);
-}
+/* 顶栏已交给外壳（#page-actions 注入），这里只保留被注入控件的样式 */
 
 .icon-btn {
-  width: 32px;
-  height: 32px;
+  width: var(--sp-6);
+  height: var(--sp-6);
   padding: 0;
   display: grid;
   place-items: center;
-  border-radius: 50%;
+  border-radius: var(--r-ctl);
   background: transparent;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
+  border: 1px solid var(--hairline);
+  color: var(--ink-muted);
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
 }
 
 .icon-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
 .src-name {
   max-width: 150px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
 }
 
 .small {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* ------------------------------ 布局 ------------------------------ */
 
+/**
+ * 左右留白由外壳的 .page（--page-pad-x 40px）负责 —— 这里再加就会叠成 80px。
+ * 所以只负责纵向节奏与大留白（大留白本身就是零阴影体系里的「托底」）。
+ */
 .stage {
   flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(300px, 400px) 1fr;
-  gap: 40px;
-  padding: 30px 36px;
+  gap: var(--sp-7);
+  padding: var(--sp-6) 0 var(--sp-7);
   overflow: hidden;
 }
 
 .left {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--sp-5);
   min-height: 0;
   overflow-y: auto;
 }
 
 /* ------------------------------ 封面 ------------------------------ */
 
+/**
+ * 「雕塑感」不靠阴影，靠**双刻线 + 衬底留白**：
+ * 外层 1px 刻线是画框，内层（.cover-layer）再一圈刻线，两层之间露出 canvas 当卡纸。
+ * 零圆角、零阴影，块面清楚；换歌时的交叉淡入发生在这两层之间。
+ */
 .cover {
+  position: relative;
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--canvas);
+  border: var(--column-rule) solid var(--hairline);
+  padding: var(--sp-3);
   display: grid;
   place-items: center;
-  color: var(--text-faint);
+  color: var(--ink-faint);
   flex: none;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-2);
+}
+
+/**
+ * 封面层。
+ *
+ * 换歌时用 <Transition name="xfade"> 让新旧两层同时存在（不加 mode），
+ * 旧层在 leave 期间仍然持有它自己那张 <img>，这才是真正的交叉淡入；
+ * 若只换 src 不换层，旧图会瞬间消失，看起来就是「硬闪一下」。
+ * 绝对定位是常驻的静态样式（不是动画属性），所以不产生任何布局动画。
+ */
+.cover-layer {
+  position: absolute;
+  inset: var(--sp-3);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--hairline-soft);
+  background: var(--surface-2);
 }
 
 .cover img {
@@ -633,26 +745,28 @@ async function saveCover(): Promise<void> {
 .meta {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--sp-2);
 }
 
+/* 标题走外壳的衬线体系（style.css 的 h1~h4），这里只收一档字号 */
 .meta h1 {
-  font-size: 21px;
-  font-weight: 600;
-  line-height: 1.35;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  color: var(--ink);
 }
 
 .sub {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
   min-width: 0;
-  font-size: 13px;
-  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
 }
 
 .album {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* 可点的歌手 / 专辑：长得像文字，点上去才亮出来 —— 免得满屏都是按钮 */
@@ -660,16 +774,18 @@ async function saveCover(): Promise<void> {
   display: block;
   min-width: 0;
   max-width: 100%;
-  padding: 2px 6px;
-  margin-left: -6px;
+  padding: var(--sp-1) var(--sp-2);
+  margin-left: calc(var(--sp-2) * -1);
   text-align: left;
   font: inherit;
   color: inherit;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-ctl);
   cursor: pointer;
-  transition: color 0.16s, background 0.16s;
+  transition:
+    color var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out);
 }
 
 .sub .jump {
@@ -690,29 +806,35 @@ async function saveCover(): Promise<void> {
 
 .tools {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
 }
 
 .tool {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 13px;
-  font-size: 12.5px;
-  border-radius: 18px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  color: var(--text-dim);
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  color: var(--ink-muted);
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out);
 }
 
 .tool:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
+/* 选中态用青铜描边 + 淡底；它落在 surface-2 上，文字用 --ink 保证达标 */
 .tool.on {
-  color: var(--accent);
-  border-color: rgba(212, 162, 76, 0.35);
+  color: var(--ink);
+  border-color: var(--accent-ring);
   background: var(--accent-soft);
 }
 
@@ -721,21 +843,22 @@ async function saveCover(): Promise<void> {
 .progress-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--sp-3);
 }
 
 .time {
-  font-size: 11.5px;
-  color: var(--text-dim);
-  min-width: 42px;
+  font-size: var(--fs-xs);
+  color: var(--ink-muted);
+  min-width: var(--sp-7);
   text-align: center;
 }
 
+/* 命中区 24px：可见轨道 2px，但滑块与原生 range 都能轻松命中（WCAG 2.5.8） */
 .seek-wrap {
   position: relative;
   flex: 1;
   min-width: 0;
-  height: 20px;
+  height: var(--sp-5);
   display: flex;
   align-items: center;
 }
@@ -743,55 +866,68 @@ async function saveCover(): Promise<void> {
 .seek-rail {
   position: relative;
   width: 100%;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--line);
-  transition: height 0.14s;
+  height: 2px;
+  background: var(--hairline);
+  /* 契约已把轨道宽度改名为 --track-w（--rail-w 是导航柱宽度），这里给本地默认值兜底 */
+  --track-w: 0;
+  /**
+   * 已评估例外（见 styles/motion.css 第 1 条）：保留 height 过渡。
+   * 只有 2px→4px、只在悬停时发生、频率极低；scaleY 会把两端拉变形。
+   */
+  transition: height var(--dur-1) var(--ease-out);
 }
 
+/**
+ * 已播放段：常驻满宽，进度只由 `--p`（0~100）经 transform 缩放决定。
+ * 之前是内联 `width: ${progress}%` —— 布局属性，每次进度更新都要重排一遍。
+ */
 .seek-fill {
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  border-radius: 2px;
+  inset: 0;
   background: var(--progress);
+  transform-origin: left center;
+  transform: scaleX(calc(var(--p, 100) / 100));
+  transition: transform var(--dur-3) var(--ease-out);
 }
 
+/* 方头滑块：与播放条同一套（8×12 硬边青铜方块 + 同底色描边） */
 .seek-knob {
+  --knob-size: 8px;
   position: absolute;
   top: 50%;
-  width: 13px;
-  height: 13px;
-  margin-left: -6.5px;
-  border-radius: 50%;
+  left: 0;
+  width: var(--knob-size);
+  height: 12px;
+  margin-left: calc(var(--knob-size) / -2);
+  border-radius: var(--r-card);
   background: var(--progress);
-  border: 2px solid var(--bg-panel);
-  transform: translateY(-50%) scale(0.8);
-  transition: transform 0.14s;
+  border: 2px solid var(--canvas);
+  /* 契约规定 --track-w 是不带单位的数字，所以要补 `* 1px` 才能得到长度 */
+  transform: translate3d(calc(var(--p, 0) * var(--track-w, 0) * 1px / 100), -50%, 0)
+    scale(var(--knob-scale, 0.9));
+  transition: transform var(--dur-3) var(--ease-out);
   pointer-events: none;
 }
 
 .seek-wrap:hover .seek-knob,
 .seek-wrap.seeking .seek-knob {
-  transform: translateY(-50%) scale(1);
+  --knob-scale: 1.15;
 }
 
 .seek-wrap:hover .seek-rail,
 .seek-wrap.seeking .seek-rail {
-  height: 6px;
+  height: 4px;
+  /* 悬停反馈走轨道色阶；原来这里给填充换的是硬编码蓝 #5b9bff，已删除 */
+  background: var(--hairline-strong);
 }
 
-.seek-wrap:hover .seek-fill {
-  background: #5b9bff;
-}
-
-/* 交互层：透明覆盖，键盘与拖动都靠它 */
+/* 交互层：透明覆盖 24px 命中区，键盘与拖动都靠它 */
 .seek {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--sp-5);
   margin: 0;
   padding: 0;
   border: none;
@@ -803,16 +939,16 @@ async function saveCover(): Promise<void> {
 }
 
 .seek::-webkit-slider-runnable-track {
-  height: 20px;
+  height: var(--sp-5);
   background: transparent;
 }
 
 .seek::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
+  width: var(--sp-5);
+  height: var(--sp-5);
+  border-radius: var(--r-card);
   background: transparent;
 }
 
@@ -825,66 +961,74 @@ async function saveCover(): Promise<void> {
 .controls {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-top: 2px;
+  gap: var(--sp-4);
+  margin-top: var(--sp-1);
 }
 
 .ctrl {
   width: 46px;
   height: 46px;
   padding: 0;
-  border-radius: 50%;
+  border-radius: var(--r-ctl);
   background: transparent;
   border: none;
-  color: var(--text-dim);
+  color: var(--ink-muted);
   display: grid;
   place-items: center;
-  transition: background 0.14s, color 0.14s, transform 0.1s;
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
 }
 
 .ctrl:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
 .ctrl:active:not(:disabled) {
-  transform: scale(0.94);
+  transform: scale(0.95);
 }
 
+/* 主按钮：青铜实心，零圆角零阴影（层次靠块面，不靠浮起） */
 .ctrl.main {
   width: 60px;
   height: 60px;
+  border-radius: var(--r-ctl);
   background: var(--accent);
-  color: #1a1408;
-  box-shadow: 0 6px 20px rgba(212, 162, 76, 0.28);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-2);
 }
 
 .ctrl.main:hover:not(:disabled) {
-  background: #e0b05c;
-  color: #1a1408;
+  background: var(--accent-hover);
+  color: var(--on-accent);
 }
 
 .ctrl:disabled {
-  opacity: 0.35;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .mode-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   margin-left: auto;
-  padding: 6px 12px;
-  font-size: 12px;
-  border-radius: 16px;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+  border-radius: var(--r-ctl);
   background: transparent;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
+  border: 1px solid var(--hairline);
+  color: var(--ink-muted);
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
 }
 
 .mode-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
 /* ------------------------------ 歌词 ------------------------------ */
@@ -901,6 +1045,7 @@ async function saveCover(): Promise<void> {
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: none;
+  /* #000 是遮罩的透明度停止点，不是主题色 —— 与配色体系无关 */
   mask-image: linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent);
   -webkit-mask-image: linear-gradient(180deg, transparent, #000 14%, #000 86%, transparent);
 }
@@ -913,25 +1058,28 @@ async function saveCover(): Promise<void> {
   height: 42%;
 }
 
+/**
+ * 歌词行。
+ *
+ * 行高、字号、常态色、以及「当前行」的过渡都由 styles/motion.css 的全局
+ * `.lyric-line` / `.lyric-line.is-active` 负责（那边只用 transform + 颜色）。
+ * 这里只留本页特有的布局与悬停：
+ *  · 显式 display:block —— 全局规则是 flex 单行布局，而本页每行含
+ *    「原文 + 译文」两段，必须保持块级堆叠；
+ *  · 绝不在 .is-active 里改 font-size / font-weight：那会改变这一行以及
+ *    它后面所有行的高度，歌词滚动用的 offsetTop 一变就会跳行
+ *    （强调改由 motion.css 的 scale + 颜色完成，transform 不影响布局盒）。
+ */
 .lyric-line {
-  padding: 10px 10px;
-  font-size: 15.5px;
-  line-height: 1.6;
-  color: var(--text-faint);
+  display: block;
+  padding: var(--sp-2) var(--sp-3);
+  line-height: var(--lh-base);
   cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: color 0.18s, background 0.18s;
+  border-radius: var(--r-ctl);
 }
 
 .lyric-line:hover {
-  background: var(--bg-hover);
-  color: var(--text-dim);
-}
-
-.lyric-line.active {
-  color: var(--accent);
-  font-size: 17px;
-  font-weight: 600;
+  background: var(--surface-3);
 }
 
 /* ------------------------------ 歌词翻译 ------------------------------ */
@@ -939,8 +1087,8 @@ async function saveCover(): Promise<void> {
 .lyric-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 10px 8px;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-3) var(--sp-2);
   flex: none;
 }
 
@@ -950,22 +1098,26 @@ async function saveCover(): Promise<void> {
   gap: 6px;
   padding: 5px 12px;
   font-size: 12.5px;
-  border-radius: 16px;
+  border-radius: var(--r-ctl);
   background: transparent;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
+  border: 1px solid var(--hairline);
+  color: var(--ink-muted);
   cursor: pointer;
-  transition: color 0.18s, background 0.18s, border-color 0.18s;
+  transition:
+    color var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out);
 }
 
 .translate-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
 .translate-btn.on {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--ink);
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
 }
 
 .translate-btn:disabled {
@@ -974,8 +1126,8 @@ async function saveCover(): Promise<void> {
 }
 
 .translate-note {
-  font-size: 11.5px;
-  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
   min-width: 0;
 }
 
@@ -988,10 +1140,10 @@ async function saveCover(): Promise<void> {
 
 .editor {
   flex: none;
-  margin: 0 10px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
+  margin: 0 var(--sp-3) var(--sp-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
   display: flex;
   flex-direction: column;
   max-height: 46vh;
@@ -1001,63 +1153,61 @@ async function saveCover(): Promise<void> {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .editor-title {
-  font-size: 12.5px;
-  color: var(--text);
+  font-size: var(--fs-sm);
+  color: var(--ink);
 }
 
 .editor-body {
   overflow-y: auto;
-  padding: 8px 12px;
+  padding: var(--sp-2) var(--sp-3);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .editor-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  gap: var(--sp-3);
   align-items: center;
 }
 
 .editor-src {
-  font-size: 12.5px;
-  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
   min-width: 0;
 }
 
 .editor-input {
   width: 100%;
-  font-size: 12.5px;
-  padding: 6px 9px;
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-2);
 }
 
 .editor-foot {
   display: flex;
-  gap: 8px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--line);
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-top: 1px solid var(--hairline);
 }
 
 .lyric-trans {
   display: block;
-  margin-top: 3px;
-  font-size: 12.5px;
-  font-weight: 400;
-  line-height: 1.5;
-  color: var(--text-faint);
-  opacity: 0.85;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-normal);
+  line-height: var(--lh-base);
+  color: var(--ink-faint);
 }
 
-.lyric-line.active .lyric-trans {
-  color: var(--text-dim);
-  opacity: 1;
+.lyric-line.is-active .lyric-trans {
+  color: var(--ink-muted);
 }
 
 .lyric-empty {
@@ -1065,10 +1215,10 @@ async function saveCover(): Promise<void> {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: var(--sp-4);
   height: 100%;
-  color: var(--text-faint);
-  font-size: 13px;
+  color: var(--ink-subtle);
+  font-size: var(--fs-sm);
 }
 
 /* ------------------------------ 其它 ------------------------------ */
@@ -1077,33 +1227,25 @@ async function saveCover(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 20px;
-  background: rgba(212, 87, 76, 0.1);
-  border-top: 1px solid rgba(212, 87, 76, 0.35);
-  font-size: 12px;
-  color: #e79a92;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-5);
+  background: var(--danger-soft);
+  border-top: 1px solid var(--danger-line);
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
 }
 
+/* 居中 toast：用 motion.css 的 toast-center（它自带 translateX(-50%)） */
 .toast {
   position: absolute;
-  bottom: 22px;
+  bottom: var(--sp-5);
   left: 50%;
-  transform: translateX(-50%);
-  padding: 8px 18px;
-  border-radius: 20px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  font-size: 12.5px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.18s;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-ctl);
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  box-shadow: var(--shadow-2);
 }
 </style>

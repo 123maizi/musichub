@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUpdated } from 'vue'
 import type { DownloadTask } from '@shared/types/download'
 import type { Quality, Song } from '@shared/types/music'
 import {
@@ -30,6 +30,38 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const running = computed(() => downloads.activeTasks.length > 0)
+
+/**
+ * 「进度回退」判定 —— 回退当帧必须瞬断，绝不能演成倒放。
+ *
+ * 为什么要单独判、而不是只看 `progress <= 0`：
+ * 实测（scripts/ui-probe-progress-frames.mjs，逐帧采样 + 逐帧记录 transition 状态）
+ * 抓到过一次真实的倒放：主进程换源丢弃残留后把进度清零，但**推给渲染层的第一个值
+ * 是 0.1% 而不是 0**（restart 后立刻收到了一小段数据）。于是 `progress <= 0` 不成立、
+ * `.no-motion` 没挂上，进度条用 520ms 从 688px 平滑缩回 226px —— 整整 88 帧的倒退动画。
+ *
+ * 所以判据必须是「**比上一帧小**」，而不是「等于 0」。
+ * 实现上不引 watcher、不做深比较：模板渲染时顺手记一份当前值，onUpdated 时翻页成
+ * 「上一帧」。两个普通 Map（非响应式），每个任务一次 get/set，成本可以忽略；
+ * 也避免了 deep watcher 去遍历整个 tasks（里面还挂着 song.raw）。
+ */
+const REWIND_EPSILON = 0.05 // 容忍百分比保留一位小数带来的抖动
+let prevProgress = new Map<string, number>()
+let curProgress = new Map<string, number>()
+
+function isRewind(task: DownloadTask): boolean {
+  curProgress.set(task.id, task.progress)
+  const prev = prevProgress.get(task.id)
+  return prev !== undefined && task.progress + REWIND_EPSILON < prev
+}
+
+onUpdated(() => {
+  // 只保留仍在列表里的任务，避免删掉的任务把 id 永远留在 Map 里
+  const alive = new Set(downloads.tasks.map((t) => t.id))
+  for (const id of curProgress.keys()) if (!alive.has(id)) curProgress.delete(id)
+  prevProgress = curProgress
+  curProgress = new Map()
+})
 
 onMounted(async () => {
   await downloads.loadConfig()
@@ -195,56 +227,54 @@ function isPlayingTask(task: DownloadTask): boolean {
 
 <template>
   <section class="view">
-    <header class="header">
-      <div class="title-row">
-        <h2>下载</h2>
-        <span class="faint small-text">
-          {{ downloads.tasks.length }} 个任务
-          <template v-if="running"> · {{ downloads.activeTasks.length }} 个进行中</template>
-        </span>
-      </div>
+    <!--
+      页面级操作注入顶栏右侧（外壳的 #page-actions）。
+      页面标题由外壳按 route.meta.title 渲染 —— 视图不许再画自己的大标题，
+      否则会出现「顶栏一个标题 + 内容区一个标题」的双标题中间态。
+    -->
+    <Teleport to="#page-actions">
+      <span class="count num">
+        {{ downloads.tasks.length }} 个任务<template v-if="running"> · {{ downloads.activeTasks.length }} 进行中</template>
+      </span>
+      <button class="ghost" :disabled="!running" @click="pauseAll">全部暂停</button>
+      <button
+        class="ghost"
+        :disabled="!downloads.tasks.some((t) => t.status === 'paused')"
+        @click="resumeAll"
+      >
+        全部继续
+      </button>
+      <button class="ghost" :disabled="downloads.failedTasks.length === 0" @click="retryFailed">
+        重试失败 ({{ downloads.failedTasks.length }})
+      </button>
+      <button
+        class="ghost"
+        :disabled="downloads.finishedTasks.length === 0"
+        @click="downloads.clearFinished()"
+      >
+        清除已完成
+      </button>
+    </Teleport>
 
-      <div class="actions">
-        <button class="ghost small" :disabled="!running" @click="pauseAll">全部暂停</button>
-        <button
-          class="ghost small"
-          :disabled="!downloads.tasks.some((t) => t.status === 'paused')"
-          @click="resumeAll"
-        >
-          全部继续
-        </button>
-        <button
-          class="ghost small"
-          :disabled="downloads.failedTasks.length === 0"
-          @click="retryFailed"
-        >
-          重试失败 ({{ downloads.failedTasks.length }})
-        </button>
-        <button
-          class="ghost small"
-          :disabled="downloads.finishedTasks.length === 0"
-          @click="downloads.clearFinished()"
-        >
-          清除已完成
-        </button>
-        <div class="grow"></div>
-        <button class="ghost small" @click="downloads.chooseDir()">
+    <!--
+      工具条：下载目录 + 下载格式。
+      左右留白由外壳 .page 统一负责（40px），视图不再自己加水平 padding，
+      否则会叠加成 80px。分区靠 1px 刻线，不靠卡片与阴影。
+    -->
+    <div class="toolbar">
+      <div class="dir-row">
+        <span class="mono dir-line ellipsis" :title="downloads.config?.dir ?? ''">
+          {{ downloads.config?.dir ?? '未设置下载目录' }}
+        </span>
+        <button class="ghost" @click="downloads.chooseDir()">
           {{ downloads.config?.dir ? '更换目录' : '选择目录' }}
         </button>
       </div>
 
-      <div v-if="downloads.config?.dir" class="dir-line mono faint ellipsis">
-        {{ downloads.config.dir }}
-      </div>
-
-      <!--
-        下载格式：直接摆在最显眼的位置。
-        以前要改格式得专门跑一趟设置页、还得先弄懂「首选音质」是什么意思。
-      -->
       <div class="format-block">
         <div class="format-head">
           <span class="format-label">下载格式</span>
-          <span class="faint small-text">选好后，搜索页点 ↓ 就按这个格式下</span>
+          <span class="hint">选好后，搜索页点 ↓ 就按这个格式下</span>
         </div>
         <DownloadFormatPicker
           :model-value="downloads.config?.preferQuality"
@@ -252,9 +282,27 @@ function isPlayingTask(task: DownloadTask): boolean {
           @update:model-value="downloads.setFormat"
         />
       </div>
-    </header>
+    </div>
 
-    <div v-if="downloads.tasks.length === 0" class="empty">
+    <!--
+      骨架屏只用于「正在读磁盘上的任务列表」这一小段真实等待，
+      不是拿来冒充空态：没有任务时要说人话，不能一直闪骨架。
+    -->
+    <div
+      v-if="downloads.tasks.length === 0 && downloads.loading"
+      class="skeleton-list"
+      aria-hidden="true"
+    >
+      <div v-for="n in 3" :key="n" class="skeleton-row">
+        <div class="skeleton skeleton-thumb"></div>
+        <div class="skeleton-lines">
+          <div class="skeleton skeleton-line"></div>
+          <div class="skeleton skeleton-line short"></div>
+        </div>
+      </div>
+    </div>
+
+    <div v-else-if="downloads.tasks.length === 0" class="empty">
       <span>还没有下载任务</span>
       <span class="faint small-text">在搜索页点某首歌右侧的 ↓ 即可加入</span>
     </div>
@@ -295,9 +343,24 @@ function isPlayingTask(task: DownloadTask): boolean {
             <span v-if="task.sourceName"> · 音源 {{ task.sourceName }}</span>
           </div>
 
-          <div class="progress-line">
+          <!--
+            进度条填充：用 --p（0~100 的纯数字）驱动 transform，**不再写内联 width**。
+            内联 width 的优先级高于样式表，会把 style.css 的 `width:100%` 盖掉，
+            于是每帧仍在写布局属性（LayoutCount/RecalcStyleCount 白涨），
+            合成层那点收益一点也拿不到 —— 也就是「半迁移」。
+
+            瞬断条件有两层：
+              · progress <= 0        —— 还没开始 / 刚刚归零
+              · isRewind(task)       —— 进度比上一帧小（换源丢弃残留、重试重下）
+            第二层是逐帧实测抓出来的：归零后推过来的第一个值可能是 0.1% 而不是 0，
+            只看第一层会漏判，进度条就会用 520ms 倒着缩回去。
+          -->
+          <div
+            class="progress-line"
+            :class="{ 'no-motion': task.progress <= 0 || isRewind(task) }"
+          >
             <div class="bar grow">
-              <i :style="{ width: `${task.progress}%` }" />
+              <i :style="{ '--p': task.progress }" />
             </div>
             <span class="mono num">{{ task.progress.toFixed(1) }}%</span>
             <span class="mono num dim">
@@ -393,74 +456,132 @@ function isPlayingTask(task: DownloadTask): boolean {
 </template>
 
 <style scoped>
+/*
+ * 下载页样式 —— 全部取值来自 token 层，本文件不出现任何手写颜色 / 字号 / 时长。
+ *
+ * 分区语言：1px 刻线 + 留白 + 字重反差。
+ * 外壳 .page 已经给了左右 40px 留白，所以这里**不再写任何水平 padding**。
+ * 零阴影、零圆角（控件最多 --r-ctl 2px）—— 层次由刻线承担。
+ */
 .view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+  flex: 1;
   min-height: 0;
-}
-
-.header {
-  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
 }
 
-.title-row {
+/* 顶栏右侧的任务计数（.num 已给等宽 tabular-nums） */
+.count {
+  color: var(--ink-subtle);
+  white-space: nowrap;
+}
+
+/* ------------------------------ 工具条 ------------------------------ */
+
+.toolbar {
+  flex: none;
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--hairline);
 }
 
-.title-row h2 {
-  font-size: 17px;
-}
-
-.small-text {
-  font-size: 11.5px;
-}
-
-.actions {
+.dir-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
+  min-width: 0;
 }
 
 .dir-line {
-  font-size: 11px;
+  color: var(--ink-subtle);
 }
-
-/* ------------------------------ 下载格式 ------------------------------ */
 
 .format-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 0 2px;
-  border-top: 1px solid var(--line);
+  gap: var(--sp-2);
 }
 
 .format-head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--sp-3);
 }
 
+/* 小标题用碑刻衬线 + 疏排，和外壳顶栏是同一套语言 */
 .format-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--ls-wide);
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
+}
+
+.small-text {
+  font-size: var(--fs-xs);
 }
 
 /*
- * 「和你选的不一样」用 danger 色，别用琥珀 —— 应用的主色就是金色 #d4a24c，
- * 再用一个近似的琥珀标警告，会跟「已选中」的格式按钮撞脸，反而看不出来。
+ * 「和你选的不一样」用 danger 的成对 token。
+ * 不用强调色：青铜是「当前状态 / 可行动」的意思，拿来标警告会互相打架。
  */
 .warn-tag {
-  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-  color: var(--danger);
+  border-color: var(--danger-line);
+  color: var(--danger-text);
+}
+
+/* ------------------------------ 骨架屏 ------------------------------ */
+
+.skeleton-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--sp-4);
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: var(--sp-7) 1fr;
+  gap: var(--sp-4);
+  align-items: center;
+  padding: var(--sp-4) 0;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+.skeleton-thumb {
+  width: var(--sp-7);
+  height: var(--sp-7);
+}
+
+.skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.skeleton-line {
+  height: var(--sp-3);
+  width: 60%;
+}
+
+.skeleton-line.short {
+  width: 32%;
+}
+
+/* ------------------------------ 空态 ------------------------------ */
+
+/* 撑满工具条以下的剩余空间，空态居中而不是贴在工具条下面 */
+.empty {
+  flex: 1;
 }
 
 /* ------------------------------ 列表 ------------------------------ */
@@ -469,29 +590,79 @@ function isPlayingTask(task: DownloadTask): boolean {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 18px 18px;
+  margin-top: var(--sp-4);
 }
 
+/*
+ * 任务行：状态用**左侧 2px 竖线**表达（与外壳导航当前项的标记同一种语言）。
+ * 竖线是绝对定位的伪元素：不参与 grid 布局，只动 transform / 背景色，
+ * 所以出现与消失都不会让行内元素挪位。
+ */
 .task {
+  position: relative;
   display: grid;
-  grid-template-columns: 52px 1fr auto;
-  gap: 14px;
+  grid-template-columns: var(--sp-7) 1fr auto;
+  gap: var(--sp-4);
   align-items: center;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line-soft);
+  padding: var(--sp-4) 0 var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--hairline-soft);
 }
 
+.task::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: var(--sp-5);
+  margin-top: calc(var(--sp-5) / -2);
+  background: var(--hairline-strong);
+  transform: scaleY(0);
+  transform-origin: center;
+  transition:
+    transform var(--dur-2) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out);
+}
+
+.task.downloading::before {
+  background: var(--accent);
+  transform: scaleY(1);
+}
+
+.task.pending::before,
+.task.waiting::before {
+  background: var(--accent);
+  opacity: 0.45;
+  transform: scaleY(1);
+}
+
+.task.done::before {
+  background: var(--ok);
+  transform: scaleY(1);
+}
+
+.task.paused::before {
+  background: var(--ink-subtle);
+  transform: scaleY(1);
+}
+
+.task.error::before,
+.task.cancelled::before {
+  background: var(--danger);
+  transform: scaleY(1);
+}
+
+/* 失败行的暖色底：用 danger-soft 而不是手写 rgba */
 .task.error {
-  background: linear-gradient(90deg, rgba(212, 87, 76, 0.06), transparent 60%);
+  background: var(--danger-soft);
 }
 
 .cover {
-  width: 52px;
-  height: 52px;
-  border-radius: 8px;
+  width: var(--sp-7);
+  height: var(--sp-7);
   overflow: hidden;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
   display: grid;
   place-items: center;
 }
@@ -502,54 +673,51 @@ function isPlayingTask(task: DownloadTask): boolean {
   object-fit: cover;
 }
 
-.cover.empty .mono {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
 .info {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--sp-1);
 }
 
 .line1 {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
 .name {
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--ink);
 }
 
 .line2 {
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
 }
 
 .progress-line {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 11px;
+  gap: var(--sp-3);
 }
 
+/* 数字列宽度固定 + .num 的 tabular-nums，进度跳动时不会把整行推来推去 */
 .num {
-  min-width: 52px;
+  min-width: 56px;
   text-align: right;
 }
 
 .err-line {
-  font-size: 11.5px;
-  color: #e79a92;
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
 }
 
 .ops {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 </style>
