@@ -2,6 +2,11 @@
 import { computed, onMounted, ref } from 'vue'
 import type { AppInfo } from '@shared/types/ipc'
 import { AI_PRESETS, type AiConfig, type AiTestResult } from '@shared/types/ai'
+import {
+  SEARCH_EMPTY_SOURCE_OPTIONS,
+  type SearchEmptySource,
+  type UiPreferences
+} from '@shared/types/preferences'
 import { QUALITY_META, QUALITY_ORDER } from '@shared/constants'
 import DownloadFormatPicker from '../components/DownloadFormatPicker.vue'
 import { useDownloadStore } from '../stores/downloads'
@@ -49,6 +54,32 @@ function numStr(value: number | undefined, fallback: number, step = 1): string {
 
 const config = computed(() => downloads.config)
 
+/* ------------------------------ 界面偏好 ------------------------------ */
+
+const prefs = ref<UiPreferences | null>(null)
+
+/**
+ * 改界面偏好。
+ *
+ * 与其它设置项一样：**先落盘再反馈**（set 返回的是主进程收敛后的值，
+ * 非法取值会被归一，界面直接用返回值校正，避免显示出实际没存进去的值）。
+ * 搜索页那边每次进页面/空态出现时会重新读一次，所以这里不需要广播事件。
+ */
+async function updatePrefs(patch: Partial<UiPreferences>): Promise<void> {
+  try {
+    prefs.value = await api.prefs.set(patch)
+    saved.value = true
+    setTimeout(() => (saved.value = false), 1600)
+  } catch (err) {
+    prefsError.value = cleanIpcError(err)
+  }
+}
+
+const prefsError = ref<string | null>(null)
+const searchEmptySource = computed<SearchEmptySource>(
+  () => prefs.value?.searchEmptySource ?? 'history'
+)
+
 /** 文件名预览，让用户不用真下载一次就知道模板效果 */
 const namePreview = computed(() => {
   const tpl = config.value?.nameTemplate ?? '{singer} - {name}'
@@ -65,6 +96,11 @@ onMounted(async () => {
   await sources.refresh()
   info.value = await api.app.info()
   aiCfg.value = await getAiConfig()
+  try {
+    prefs.value = await api.prefs.get()
+  } catch (err) {
+    prefsError.value = cleanIpcError(err)
+  }
 })
 
 async function update(patch: Parameters<typeof downloads.setConfig>[0]): Promise<void> {
@@ -582,6 +618,32 @@ async function runAiTest(): Promise<void> {
         </div>
       </div>
 
+      <!-- ------------------------------ 界面 ------------------------------ -->
+      <div class="group">
+        <div class="group-title">界面</div>
+
+        <div class="field">
+          <label>搜索页空态显示</label>
+          <div class="control col gap-4">
+            <select
+              data-pref="searchEmptySource"
+              :value="searchEmptySource"
+              @change="updatePrefs({ searchEmptySource: ($event.target as HTMLSelectElement).value as SearchEmptySource })"
+            >
+              <option v-for="opt in SEARCH_EMPTY_SOURCE_OPTIONS" :key="opt.value" :value="opt.value">
+                {{ opt.label }}（{{ opt.hint }}）
+              </option>
+            </select>
+            <span class="faint note">
+              搜索页还没输入关键词时，下面那块显示哪一类歌曲。默认「历史播放」——
+              刚打开搜索页时最常想做的就是把上一次没听完的接着听。
+              改完立即生效并落盘，不必重启。
+            </span>
+            <span v-if="prefsError" class="faint note err-note">{{ prefsError }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- ------------------------------ 关于 ------------------------------ -->
       <div class="group">
         <div class="group-title">关于</div>
@@ -743,6 +805,11 @@ input[readonly] {
 
 .preview {
   font-size: var(--fs-xs);
+}
+
+/* 偏好读取/写入失败时的提示：用成对 danger token，不手写色值 */
+.err-note {
+  color: var(--danger-text);
 }
 
 /*

@@ -14,6 +14,7 @@ import type {
   DownloadFileAudit
 } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
+import type { UiPreferences } from '@shared/types/preferences'
 
 /** 注销函数：调用后停止监听 */
 type Unsubscribe = () => void
@@ -110,6 +111,22 @@ const api = {
       invoke(CH.lyricSavedSet, entry) as Promise<SavedTranslation>,
     /** 删掉译文，相当于「重新翻一遍」 */
     deleteSaved: (songId: string) => invoke(CH.lyricSavedDelete, songId)
+  },
+
+  /* ------------------------------ 界面偏好 ------------------------------ */
+  /**
+   * 界面偏好：搜索页空态显示哪一类歌曲 + 搜索历史。
+   * 与 download / ai 的配置分开一条通道；落盘在 ui-prefs.json，重启保留。
+   */
+  prefs: {
+    get: () => invoke(CH.prefsGet) as Promise<UiPreferences>,
+    set: (patch: Partial<UiPreferences>) => invoke(CH.prefsSet, patch) as Promise<UiPreferences>,
+    /** 记一次真实发起的搜索（回车 / 点搜索按钮时调；不要在每次键入时调） */
+    addSearchHistory: (keyword: string) =>
+      invoke(CH.searchHistoryAdd, keyword) as Promise<string[]>,
+    removeSearchHistory: (keyword: string) =>
+      invoke(CH.searchHistoryRemove, keyword) as Promise<string[]>,
+    clearSearchHistory: () => invoke(CH.searchHistoryClear) as Promise<string[]>
   },
 
   /* ------------------------------ 下载 ------------------------------ */

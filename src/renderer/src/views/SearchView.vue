@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { PLATFORM_META } from '@shared/constants'
 import type { Song } from '@shared/types/music'
+import { SEARCH_EMPTY_SOURCE_OPTIONS, type SearchEmptySource } from '@shared/types/preferences'
 import SongTable from '../components/SongTable.vue'
 import DownloadFormatPicker from '../components/DownloadFormatPicker.vue'
+import SearchHistoryDropdown from '../components/SearchHistoryDropdown.vue'
 import { useAlbumStore, type AlbumInfo } from '../stores/album'
 import { useArtistStore, type ArtistInfo } from '../stores/artist'
+import { useLibraryStore } from '../stores/library'
 import { useSearchStore } from '../stores/search'
 import { usePlayerStore } from '../stores/player'
 import { useDownloadStore } from '../stores/downloads'
@@ -19,6 +22,7 @@ const albumStore = useAlbumStore()
 const player = usePlayerStore()
 const downloads = useDownloadStore()
 const sources = useSourceStore()
+const library = useLibraryStore()
 
 /** 搜索模式：歌曲 / 歌手 / 专辑 —— 三条相互独立的链路 */
 const mode = ref<'song' | 'artist' | 'album'>('song')
@@ -49,11 +53,171 @@ const toast = ref<string | null>(null)
 
 const noSource = computed(() => sources.readySources.length === 0)
 
+/* ------------------------------------------------------------------ *
+ * 搜索页空态：把「还没搜 / 搜了没结果」的整页留白换成歌曲列表
+ *
+ * · 数据只从已有的 library store 取（history / favorites / playlists[0]），
+ *   不新增任何 IPC
+ * · 列表复用 SongTable —— 双击播放、收藏、下载、加队列、封面圆角、
+ *   七列栅格全部自动一致
+ * · 行数封顶 EMPTY_LIMIT：140 行是硬上限场景，这里绝不能把整份历史渲染出来
+ * ------------------------------------------------------------------ */
+
+/** 空态最多渲染多少行（task 要求 20~30） */
+const EMPTY_LIMIT = 24
+
+/** 三种来源的元信息直接用共享契约里的（与设置页文案一致） */
+const emptySourceOptions = SEARCH_EMPTY_SOURCE_OPTIONS
+
+const emptySourceMeta = computed(
+  () =>
+    SEARCH_EMPTY_SOURCE_OPTIONS.find((o) => o.value === search.emptySource) ??
+    SEARCH_EMPTY_SOURCE_OPTIONS[0]
+)
+
+/** 当前来源的完整列表（未截断），用于算「共 N 首」与空判定 */
+const emptyAll = computed<Song[]>(() => {
+  if (search.emptySource === 'favorites') return library.favorites
+  if (search.emptySource === 'playlist') {
+    // 多歌单时取第一个（task 允许），并把歌单名写进提示里，避免用户不知道看的是哪个
+    const first = library.playlists[0]
+    if (!first) return []
+    const seen = new Set<string>()
+    const merged: Song[] = []
+    for (const song of first.songs) {
+      if (seen.has(song.id)) continue
+      seen.add(song.id)
+      merged.push(song)
+    }
+    return merged
+  }
+  return library.history.map((entry) => entry.song)
+})
+
+/** 实际渲染的行（封顶） */
+const emptySongs = computed<Song[]>(() => emptyAll.value.slice(0, EMPTY_LIMIT))
+
+/** 歌单来源时提示里带上歌单名 */
+const emptySourceDetail = computed(() => {
+  if (search.emptySource !== 'playlist') return emptySourceMeta.value.hint
+  const first = library.playlists[0]
+  return first ? `歌单「${first.name}」里的歌` : '还没有建过歌单'
+})
+
+/** 是否已经搜过（用于区分「还没搜」与「搜了但零结果」） */
+const hasSearched = computed(
+  () => search.keyword.trim() !== '' || search.platforms.length > 0
+)
+
+/** 空态区块的标题 */
+const emptyTitle = computed(() => {
+  if (search.emptySource === 'favorites') return '我喜欢的'
+  if (search.emptySource === 'playlist') return '歌单里的歌'
+  return '继续听'
+})
+
+/**
+ * 什么时候显示空态区块：
+ * 歌曲模式 + 不在检索中 + 一条结果都没有。
+ * 有结果时这里恒为 false，正常搜索路径的结构与行为完全不变。
+ */
+const showEmptyPanel = computed(
+  () => mode.value === 'song' && !search.loading && search.visibleSongs.length === 0
+)
+
+/** 切来源：本地立即生效，落盘交给 store（走 task-12 的 prefs:set） */
+function switchEmptySource(next: SearchEmptySource): void {
+  void search.setEmptySource(next)
+}
+
+/** 空态列表里的播放：队列必须是「这一屏的歌」，不能是空的搜索结果 */
+async function playEmptySong(song: Song): Promise<void> {
+  await player.play(song, emptySongs.value)
+}
+
+onMounted(() => {
+  void search.loadEmptySourcePref()
+  // 直接进搜索页时 library 可能还没加载过（App 挂载时刷过一次，这里是兜底）
+  if (library.favorites.length === 0 && library.history.length === 0) void library.refresh()
+})
+
+/**
+ * 空态「出现」的那一刻重读一次偏好：
+ * 用户多半是刚在设置页改完切回搜索页，进页面时的读取已经拿到新值；
+ * 这里再兜一次「从有结果变成空态」的情况（例如清空输入框）。
+ */
+watch(showEmptyPanel, (now, before) => {
+  if (now && !before) void search.loadEmptySourcePref()
+})
+
+
 onMounted(() => {
   inputEl.value?.focus()
 })
 
+/* ------------------------------------------------------------------ *
+ * 搜索历史下拉（组件归 main-lifecycle，挂载点归本文件）
+ *
+ * 与空态歌曲列表的优先级（两层互不争抢，写清楚免得后人踩）：
+ *   · 下拉是**浮层**，锚在搜索框下方：只要输入框聚焦**且历史里有可选项**就展开
+ *     （空输入 → 全部历史；有输入 → 按包含匹配过滤，组件内部自己过滤）
+ *   · 空态歌曲列表是**页面内容**：只在「歌曲模式 + 不在检索 + 零结果」时渲染
+ *   · 两者可以同时存在（聚焦时下拉浮在列表上方），也可以各自单独存在：
+ *       有结果 + 聚焦  → 只有下拉
+ *       无结果 + 未聚焦 → 只有空态列表
+ *       无结果 + 聚焦   → 下拉浮层 + 下面照常是空态列表
+ *     互斥的只有「下拉展开」与「输入框失焦」这一对（失焦即关）。
+ * ------------------------------------------------------------------ */
+const showHistory = ref(false)
+
+/**
+ * 关下拉的延时句柄。
+ *
+ * 为什么不直接 @blur 立刻关：下拉的每一行是普通元素（不是按钮），
+ * 点它会先让输入框 blur、再冒泡出 click —— 立刻关会把浮层在 click 之前
+ * 拆掉，于是「点历史项」永远点不中。留 250ms 让这次点击走完。
+ */
+let historyCloseTimer: ReturnType<typeof setTimeout> | null = null
+
+function openHistory(): void {
+  if (historyCloseTimer) {
+    clearTimeout(historyCloseTimer)
+    historyCloseTimer = null
+  }
+  showHistory.value = true
+}
+
+function closeHistoryNow(): void {
+  if (historyCloseTimer) {
+    clearTimeout(historyCloseTimer)
+    historyCloseTimer = null
+  }
+  showHistory.value = false
+}
+
+function scheduleCloseHistory(): void {
+  if (historyCloseTimer) clearTimeout(historyCloseTimer)
+  historyCloseTimer = setTimeout(() => {
+    historyCloseTimer = null
+    showHistory.value = false
+  }, 250)
+}
+
+/** 从历史里选一条：立即用该词搜索并收起下拉（关键词由组件负责提到最前） */
+async function runHistorySearch(keyword: string): Promise<void> {
+  const kw = keyword.trim()
+  closeHistoryNow()
+  if (!kw) return
+  search.keyword = kw
+  inputEl.value?.blur()
+  await search.search(kw)
+}
+
 function runSearch(): void {
+  // 只有「真正发起一次搜索」（回车 / 点搜索按钮 / 切模式带词重搜）才写历史，
+  // 每次键入不写 —— 这是需求点名的
+  if (search.keyword.trim()) void window.api.prefs.addSearchHistory(search.keyword.trim())
+  closeHistoryNow()
   // 三条链路完全独立：歌曲 / 歌手 / 专辑 各走各的 store
   if (mode.value === 'artist') {
     void artistStore.search(search.keyword)
@@ -139,10 +303,27 @@ async function downloadSelected(): Promise<void> {
           placeholder="搜索歌曲、歌手、专辑…"
           spellcheck="false"
           @keyup.enter="runSearch"
+          @focus="openHistory"
+          @click="openHistory"
+          @input="openHistory"
+          @blur="scheduleCloseHistory"
         />
         <button class="primary" :disabled="search.loading || !search.keyword.trim()" @click="runSearch">
           {{ search.loading ? '搜索中' : '搜索' }}
         </button>
+
+        <!--
+          搜索历史浮层：锚在搜索框下方的绝对定位层（组件内部自己管定位、
+          键盘 ↑↓ Enter Esc、单条删除、清空全部、点外关闭）。
+          只在这里挂载，不改组件 —— 组件归 main-lifecycle。
+        -->
+        <SearchHistoryDropdown
+          :visible="showHistory"
+          :query="search.keyword"
+          :anchor="inputEl"
+          @pick="runHistorySearch"
+          @close="closeHistoryNow"
+        />
       </div>
 
       <div class="meta-row">
@@ -274,8 +455,13 @@ async function downloadSelected(): Promise<void> {
       </span>
     </div>
 
-    <!-- 结果区：歌曲表 / 艺人网格 -->
-    <div class="results">
+    <!--
+      结果区：歌曲表 / 艺人网格 / 专辑网格。
+      空态（歌曲模式 + 无结果 + 不在检索中）时整块让位给下面的推荐区，
+      所以此时 .results 不存在 —— .results .row 保持 0，
+      而推荐区自己的行在 .recommend 里，两边互不干扰。
+    -->
+    <div v-if="!(mode === 'song' && showEmptyPanel)" class="results">
       <SongTable
         v-if="mode === 'song'"
         v-model:selected-ids="selectedIds"
@@ -350,6 +536,74 @@ async function downloadSelected(): Promise<void> {
         </div>
       </div>
     </div>
+
+    <!--
+      搜索页空态：把整页留白换成「继续听 / 我喜欢的 / 歌单里的歌」。
+      用独立容器（而不是塞进 .results）有两个原因：
+        1. 验收要求空态下 .results .row === 0，同时推荐区行数 > 0，两个断言都要成立
+        2. 有结果时这一整块不渲染，正常搜索路径零改动
+    -->
+    <section v-else class="recommend">
+      <div class="recommend-head">
+        <div class="recommend-titles">
+          <h2 class="recommend-title">{{ emptyTitle }}</h2>
+          <span class="faint small-text">
+            <template v-if="hasSearched">
+              没有找到「{{ search.keyword }}」的内容 · 先听听{{ emptySourceDetail }}
+            </template>
+            <template v-else>{{ emptySourceDetail }}</template>
+            <template v-if="emptyAll.length > emptySongs.length">
+              · 共 {{ emptyAll.length }} 首，先显示前 {{ EMPTY_LIMIT }} 首
+            </template>
+          </span>
+        </div>
+        <div class="grow"></div>
+        <!-- 切换来源入口：常显，所以「来源为空」时也不需要另做一套控件 -->
+        <div class="source-switch">
+          <button
+            v-for="option in emptySourceOptions"
+            :key="option.value"
+            class="ghost small"
+            :class="{ active: search.emptySource === option.value }"
+            :title="option.hint"
+            @click="switchEmptySource(option.value)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="emptySongs.length > 0" class="recommend-body">
+        <SongTable
+          :songs="emptySongs"
+          :loading="false"
+          :current-id="player.current?.id ?? ''"
+          :selectable="false"
+          :empty-text="`${emptySourceDetail}还是空的`"
+          @play="playEmptySong"
+          @queue="queueSong"
+          @download="downloadSong"
+          @search="searchByKeyword"
+        />
+      </div>
+
+      <!-- 这个来源本来就没歌：给引导文案 + 指向上面的切换入口，不留白 -->
+      <div v-else class="recommend-empty">
+        <span class="faint">{{ emptySourceDetail }}还是空的</span>
+        <span class="faint small-text">
+          <template v-if="search.emptySource === 'history'">
+            去搜一首听听，或者用上面的按钮换成「我喜欢的 / 歌单歌曲」
+          </template>
+          <template v-else-if="search.emptySource === 'favorites'">
+            在列表里点右侧的心形就能收藏，或者换成「历史播放 / 歌单歌曲」
+          </template>
+          <template v-else>
+            还没有建过歌单 —— 在「我的」页新建一个，或者换成「历史播放 / 我喜欢的」
+          </template>
+        </span>
+        <button class="ghost small" @click="$router.push('/library')">去「我的」看看</button>
+      </div>
+    </section>
 
     <!-- 分页 -->
     <!--
@@ -555,6 +809,92 @@ async function downloadSelected(): Promise<void> {
 
 .results :deep(.body) {
   flex: 1;
+}
+
+/* ------------------------------ 空态推荐区 ------------------------------ */
+
+/*
+ * 「还没搜 / 搜了没结果」时用起来的区块。
+ * 结构与 .results 平行：head（标题 + 来源切换）+ body（复用 SongTable）。
+ * 行数在脚本里封顶 24，所以这里的滚动成本与 140 行主列表完全不是一个量级。
+ */
+.recommend {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-3) 0 0;
+  overflow: hidden;
+}
+
+.recommend-head {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.recommend-titles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.recommend-title {
+  font-size: var(--fs-md);
+}
+
+/* 来源切换：刻线分格的分段控件，与库页 tabs 同一套语言 */
+.source-switch {
+  display: flex;
+  gap: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-ctl);
+  overflow: hidden;
+}
+
+.source-switch .ghost {
+  border-radius: 0;
+  border-color: transparent;
+  padding: var(--sp-1) var(--sp-3);
+}
+
+.source-switch .ghost + .ghost {
+  border-left: 1px solid var(--hairline);
+}
+
+.source-switch .ghost.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.recommend-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-2) 0 0;
+  overflow: hidden;
+}
+
+.recommend-body :deep(.body) {
+  flex: 1;
+}
+
+/* 该来源本来就没歌：引导文案 + 「去我的看看」，不留白 */
+.recommend-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-5);
+  text-align: center;
+  color: var(--ink-subtle);
 }
 
 /* ------------------------------ 艺人网格 ------------------------------ */

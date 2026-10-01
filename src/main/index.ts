@@ -25,6 +25,7 @@ import { JsonStore } from './core/storage/store'
 import { LibraryService } from './core/storage/library'
 import { AiConfigStore, type StoredAiConfig } from './core/storage/ai-config'
 import { SavedTranslationStore } from './core/storage/saved-translation'
+import { PreferencesStore } from './core/storage/preferences'
 import { DEFAULT_AI_CONFIG } from '@shared/types/ai'
 import type { SavedTranslation } from '@shared/types/ai'
 import { registerIpc } from './ipc'
@@ -213,6 +214,12 @@ async function bootstrap(): Promise<void> {
     )
   )
 
+  /**
+   * 界面偏好（搜索页空态来源 + 搜索历史）。
+   * 单独一份文件：这是「界面看起来怎样」，与下载配置、AI 配置都不该混在一起。
+   */
+  const prefs = new PreferencesStore(join(userData, 'ui-prefs.json'))
+
   /* --------------------------- 3. 核心服务 --------------------------- */
   const sourceDir = join(userData, APP_CONST.sourceDirName)
   /**
@@ -281,6 +288,7 @@ async function bootstrap(): Promise<void> {
     proxy,
     ai: aiStore,
     savedTranslations,
+    prefs,
     sourceDir,
     downloadDir: configStore.get().dir
   })
@@ -337,6 +345,8 @@ async function bootstrap(): Promise<void> {
       // 若正好落在 300ms 防抖窗口内退出就会丢，现在补上
       aiStore.flush()
       savedTranslations.flush()
+      // 搜索历史/界面偏好也走防抖：退出前必须落盘，否则刚搜的词会丢
+      prefs.dispose()
       search.dispose()
       steps.push(proxy.stop())
       log('info', 'app', '退出清理已发起')

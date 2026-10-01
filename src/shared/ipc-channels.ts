@@ -75,7 +75,13 @@ export const CH = {
   // 译文的保存与手动编辑
   lyricSavedGet: 'lyric:savedGet',
   lyricSavedSet: 'lyric:savedSet',
-  lyricSavedDelete: 'lyric:savedDelete'
+  lyricSavedDelete: 'lyric:savedDelete',
+  // 界面偏好（搜索页空态来源、搜索历史）—— 与下载配置分开的一份偏好
+  prefsGet: 'prefs:get',
+  prefsSet: 'prefs:set',
+  searchHistoryAdd: 'searchHistory:add',
+  searchHistoryRemove: 'searchHistory:remove',
+  searchHistoryClear: 'searchHistory:clear'
 } as const
 
 /** 主进程 → 渲染层 推送通道 */

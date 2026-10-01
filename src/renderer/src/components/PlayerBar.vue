@@ -110,6 +110,9 @@ function syncSeekInput(): void {
  * 键盘改值前先把基准对齐到真实进度。
  * keydown 早于浏览器对 range 的默认步进，所以这里同步完，紧接着的
  * ←/→ 就是「从当前真实位置再走 5 秒」，绝不会从 1 秒前的旧值起步。
+ *
+ * ⚠️ 别改成「拦截 ←/→ 手动 ±5 秒 + 把 step 调细」—— 我在 NowPlayingView 上试过，
+ * 会让点击与拖动一起坏掉（误差 −12/−76.6/−141px、回弹 146，且在可信环境下复现）。
  */
 function onSeekKeydown(event: KeyboardEvent): void {
   const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']
@@ -132,8 +135,47 @@ onMounted(() => {
   railObserver.observe(el)
 })
 
-/** 拖动进度条时先用本地值预览，松手才真正 seek */
-const displayProgress = computed(() => (seeking.value ? seekValue.value : player.progress))
+/**
+ * 位置来源唯一化：提交后把**目标百分比**钉住，直到 store 的 progress 追上
+ * （阈值 1%，600ms 兜底）。否则 `seeking=false` 的那一刻填充会先弹回旧位置、
+ * 等 store 追上再跳 —— 用户看到的就是「进度条在鼠标前面/后面」。
+ */
+const pendingSeek = ref<number | null>(null)
+let pendingTimer: ReturnType<typeof setTimeout> | null = null
+
+function holdSeekTarget(percent: number): void {
+  pendingSeek.value = percent
+  if (pendingTimer) clearTimeout(pendingTimer)
+  pendingTimer = setTimeout(() => {
+    pendingSeek.value = null
+    pendingTimer = null
+  }, 600)
+}
+
+/** 拖动时用本地值预览；提交后用钉住的目标；其余时间跟 store */
+const displayProgress = computed(() => {
+  if (seeking.value) return seekValue.value
+  if (pendingSeek.value !== null) return pendingSeek.value
+  return player.progress
+})
+
+watch(
+  () => player.progress,
+  (p) => {
+    if (pendingSeek.value !== null && Math.abs(p - pendingSeek.value) < 1) {
+      pendingSeek.value = null
+      if (pendingTimer) {
+        clearTimeout(pendingTimer)
+        pendingTimer = null
+      }
+    }
+  }
+)
+
+onBeforeUnmount(() => {
+  if (pendingTimer) clearTimeout(pendingTimer)
+  pendingTimer = null
+})
 
 function onSeekInput(event: Event): void {
   seeking.value = true
@@ -142,7 +184,12 @@ function onSeekInput(event: Event): void {
 }
 
 function onSeekCommit(event: Event): void {
-  player.seek(Number((event.target as HTMLInputElement).value))
+  const seconds = Number((event.target as HTMLInputElement).value)
+  const total = player.duration
+  const percent = total > 0 ? (seconds / total) * 100 : 0
+  seekValue.value = percent
+  holdSeekTarget(percent)
+  player.seek(seconds)
   seeking.value = false
   syncSeekInput()
 }
@@ -201,7 +248,8 @@ function openPlaylistMenu(event: MouseEvent): void {
         <div class="progress-knob"></div>
       </div>
       <!--
-        刻度是「秒」：min=0 / max=时长 / step=5 → 键盘一次 ←/→ 正好 5 秒。
+        刻度是「秒」：min=0 / max=时长 / **step=0.1**（细刻度保点击精度，
+        键盘的 5 秒步进在 onSeekKeydown 里显式实现，两者解耦）。
         不绑 :value：播放期间对 range 的写入为 0（写 value 会重排输入框影子树），
         基准改在 focus / keydown / 换歌 / 播放状态变化时同步。
       -->
@@ -481,10 +529,15 @@ function openPlaylistMenu(event: MouseEvent): void {
   background: transparent;
 }
 
+/**
+ * 原生滑块必须是**窄**的（2px）：Chromium 的 range 把可点区间按「半个滑块宽」
+ * 内缩，滑块 24px 时点 20% 会被算成 ~18.8%（600px 轨道上偏 7px）。
+ * 命中区由元素自身的 24px 高度保证，不靠滑块宽度 —— 所以这里收窄只影响映射精度。
+ */
 .progress-input::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: var(--sp-5);
+  width: 2px;
   height: var(--sp-5);
   border-radius: var(--r-card);
   background: transparent;

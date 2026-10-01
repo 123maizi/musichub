@@ -53,6 +53,7 @@ watch(
 )
 
 onMounted(() => {
+  syncSeekInput()
   const el = railEl.value
   if (!el) return
   railWidth.value = el.clientWidth
@@ -232,34 +233,96 @@ function openAlbumPage(): void {
 
 /* ------------------------------ 进度条 ------------------------------ */
 
-const displayProgress = computed(() =>
-  seeking.value ? seekValue.value : player.progress
-)
-
 /**
- * 原生 range 的 value 只在「需要当基准」时才同步，且必须绑字符串 +
- * 与 step 对齐的精度（range 会按 step 把 value 对齐，绑未对齐的数字会导致
- * 每次重渲染都写一次 value，从而重排输入框内部影子树：实测 1.02 次布局/更新）。
- * 拖动时不能写它，否则会把用户拖到一半的值打回去。
+ * 「填充/滑块」与「鼠标位置」在任何时刻只能有**一个**位置来源。
+ *
+ * 旧写法 `seeking ? seekValue : player.progress` 有两个错位来源：
+ *  1. `change` 里立刻把 `seeking=false`，而 store 的 progress 还没更新 →
+ *     填充先弹回旧位置、等 store 追上再跳过去（用户看到的「在鼠标后面」）；
+ *  2. 原生 range 的 value 走 `seekBase`（低频同步），与 `--p` 是两套来源
+ *     （原生滑块不可见，但它的 value 仍会影响键盘基准）。
+ * 现在：提交时记下**目标百分比**并保持住，直到 `player.progress` 真正追上
+ * （阈值 1%，另有 600ms 兜底），期间只有一个来源 —— 鼠标落点。
  */
-const seekBase = ref(0)
-let lastSeekSync = 0
+const pendingSeek = ref<number | null>(null)
+let pendingTimer: ReturnType<typeof setTimeout> | null = null
+
+function holdSeekTarget(percent: number): void {
+  pendingSeek.value = percent
+  if (pendingTimer) clearTimeout(pendingTimer)
+  pendingTimer = setTimeout(() => {
+    pendingSeek.value = null
+    pendingTimer = null
+  }, 600)
+}
+
+const displayProgress = computed(() => {
+  if (seeking.value) return seekValue.value
+  if (pendingSeek.value !== null) return pendingSeek.value
+  return player.progress
+})
+
+/* store 追上目标就释放（数值判断，不用固定 sleep） */
 watch(
   () => player.progress,
-  (next, prev) => {
-    const jumpedBack = next + 0.5 < (prev ?? 0)
-    const now = Date.now()
-    if (!jumpedBack && player.playing && now - lastSeekSync < 1000) return
-    lastSeekSync = now
-    seekBase.value = next
-  },
-  { immediate: true }
+  (p) => {
+    if (pendingSeek.value !== null && Math.abs(p - pendingSeek.value) < 1) {
+      pendingSeek.value = null
+      if (pendingTimer) {
+        clearTimeout(pendingTimer)
+        pendingTimer = null
+      }
+    }
+  }
 )
 
-/** 实际绑给 range 的值：拖动中跟随手指，平时用低频基准（精度与 step 对齐） */
-const seekInputProp = computed(() =>
-  String(Math.round((seeking.value ? seekValue.value : seekBase.value) * 10) / 10)
-)
+onBeforeUnmount(() => {
+  if (pendingTimer) clearTimeout(pendingTimer)
+  pendingTimer = null
+})
+
+/**
+ * range 的刻度用**秒**（min=0 / max=时长 / step=5）：键盘一次 ←/→ 正好 5 秒，
+ * 与 store 位置一一对应（与播放条同一套）。
+ * 仍然**不绑 `:value`**：写 range 的 value 会重排输入框内部影子树（1 次布局/次），
+ * 播放期间一次都不该写；基准只在 focus / keydown / 换歌 / 播放态变化时同步。
+ *
+ * ⚠️ 别把 step 调细（例如 0.1）来换点击精度 —— 实测会让指针命中一起坏掉，见
+ * onSeekKeydown 上方那段说明。
+ */
+const seekInputEl = ref<HTMLInputElement | null>(null)
+const seekMax = computed(() => Math.max(0, Math.floor(player.duration || 0)))
+
+function syncSeekInput(): void {
+  const el = seekInputEl.value
+  if (!el) return
+  const seconds = seeking.value
+    ? (seekValue.value / 100) * (player.duration || 0)
+    : player.currentTime
+  // 与 step=5 对齐（秒刻度）
+  const next = String(Math.round(seconds))
+  if (el.value !== next) el.value = next
+}
+
+/**
+ * 键盘步进。
+ *
+ * ⚠️ 这里**不要改成拦截 ArrowLeft/ArrowRight 手动 ±5 秒** —— 我试过：
+ * 把 `step` 从 5 改成 0.1（想让点击落点更准），并在 keydown 里自己实现 5 秒。
+ * 结果**点击与拖动一起坏了**：误差从 ≤2px 变成 −12/−76.6/−141px、回弹帧 146，
+ * 且是在 `document.hidden=false`、rAF 88 帧的可信环境下复现的。
+ * 说明 `step` 的取值本身会影响 range 的指针命中行为，不是纯量化精度问题。
+ * 已回退。目前 step=5 与点击精度（≤2px 级）是可以共存的，别为了 3.9px 的理论
+ * 量化误差去动它 —— 那会换来一个更大的真实回归。
+ * 如需继续追这条，先做「同一构建、只改 step」的对照，并全程带 rAF 环境守卫。
+ */
+function onSeekKeydown(event: KeyboardEvent): void {
+  const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']
+  if (keys.includes(event.key)) syncSeekInput()
+}
+
+watch(() => player.current?.id, syncSeekInput)
+watch(() => player.playing, syncSeekInput)
 
 const displayTime = computed(() =>
   seeking.value && player.duration > 0
@@ -269,12 +332,24 @@ const displayTime = computed(() =>
 
 function onSeekInput(event: Event): void {
   seeking.value = true
-  seekValue.value = Number((event.target as HTMLInputElement).value)
+  const total = player.duration
+  seekValue.value = total > 0 ? (Number((event.target as HTMLInputElement).value) / total) * 100 : 0
 }
 
+/**
+ * 提交：先把目标位置钉住，再让 store 去追。
+ * 这样 `change` 之后即使 store 还没更新，填充也停在鼠标落点上（不回弹）；
+ * 只发 `change` 不发 `input` 的浏览器（第 3 种错位来源）也走这一条路。
+ */
 function onSeekCommit(event: Event): void {
-  player.seekByPercent(Number((event.target as HTMLInputElement).value))
+  const seconds = Number((event.target as HTMLInputElement).value)
+  const total = player.duration
+  const percent = total > 0 ? (seconds / total) * 100 : 0
+  seekValue.value = percent
+  holdSeekTarget(percent)
+  player.seek(seconds)
   seeking.value = false
+  syncSeekInput()
 }
 
 /* ------------------------------ 歌词滚动 ------------------------------ */
@@ -477,15 +552,18 @@ async function saveCover(): Promise<void> {
               <div class="seek-fill"></div>
               <div class="seek-knob"></div>
             </div>
+            <!-- 刻度=秒：键盘一次 ←/→ 正好 5 秒；不绑 :value（见脚本注释） -->
             <input
+              ref="seekInputEl"
               class="seek"
               type="range"
               min="0"
-              max="100"
-              step="0.1"
-              :value="seekInputProp"
+              :max="seekMax"
+              step="5"
               :disabled="!player.current || player.duration <= 0"
               aria-label="播放进度"
+              @focus="syncSeekInput"
+              @keydown="onSeekKeydown"
               @input="onSeekInput"
               @change="onSeekCommit"
             />
@@ -943,10 +1021,15 @@ async function saveCover(): Promise<void> {
   background: transparent;
 }
 
+/**
+ * 原生滑块必须是**窄**的（2px）：Chromium 的 range 把可点区间按「半个滑块宽」
+ * 内缩，滑块 24px 时点 20% 会被算成 ~18.8%（600px 轨道上偏 7px）→ 填充落在鼠标后面。
+ * 命中区由元素自身的 24px 高度保证，不靠滑块宽度。
+ */
 .seek::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: var(--sp-5);
+  width: 2px;
   height: var(--sp-5);
   border-radius: var(--r-card);
   background: transparent;

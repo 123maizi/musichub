@@ -13,6 +13,7 @@ import type { SavedTranslation } from '@shared/types/ai'
 import { AI_PRESETS } from '@shared/types/ai'
 import type { DownloadAddRequest, DownloadConfig } from '@shared/types/download'
 import type { AppInfo } from '@shared/types/ipc'
+import type { UiPreferences } from '@shared/types/preferences'
 import type { SourceManager } from '@main/core/source/manager'
 import type { SearchEngine } from '@main/core/search/engine'
 import type { MusicResolver } from '@main/core/source/resolver'
@@ -40,6 +41,8 @@ export interface IpcContext {
   ai: import('@main/core/storage/ai-config').AiConfigStore
   /** 已保存的译文（切歌回来、重启后都还在） */
   savedTranslations: import('@main/core/storage/saved-translation').SavedTranslationStore
+  /** 界面偏好（搜索页空态来源、搜索历史） */
+  prefs: import('@main/core/storage/preferences').PreferencesStore
   /** 音源目录 */
   sourceDir: string
   /** 默认下载目录 */
@@ -48,7 +51,7 @@ export interface IpcContext {
 
 /** 注册全部 IPC 处理器，并把服务的推送事件转发到渲染层 */
 export function registerIpc(ctx: IpcContext): () => void {
-  const { sources, search, resolver, downloads, proxy, ai, savedTranslations } = ctx
+  const { sources, search, resolver, downloads, proxy, ai, savedTranslations, prefs } = ctx
 
   /* ------------------------------ 音源 ------------------------------ */
 
@@ -320,6 +323,30 @@ export function registerIpc(ctx: IpcContext): () => void {
   ipcMain.handle(CH.lyricSavedDelete, (_e, songId: string) => {
     savedTranslations.remove(songId)
   })
+
+  /* ------------------------------ 界面偏好 ------------------------------ */
+  /**
+   * 界面偏好：搜索页空态显示哪一类歌曲、搜索历史。
+   *
+   * 和「下载配置」分开一条通道，是因为两者的语义与落盘文件都不同；
+   * 渲染层读回的一律是收敛过的合法值（老配置文件 / 手改 JSON 都不会漏出脏值）。
+   */
+  ipcMain.handle(CH.prefsGet, () => prefs.get())
+
+  ipcMain.handle(CH.prefsSet, (_e, patch: Partial<UiPreferences>) => prefs.set(patch ?? {}))
+
+  /**
+   * 记录一次搜索历史。
+   * 只在**真正发起搜索**时由渲染层调用（回车 / 点搜索按钮），
+   * 每次键入不调 —— 否则历史会被半截关键词刷满。
+   */
+  ipcMain.handle(CH.searchHistoryAdd, (_e, keyword: string) => prefs.addSearchHistory(keyword))
+
+  ipcMain.handle(CH.searchHistoryRemove, (_e, keyword: string) =>
+    prefs.removeSearchHistory(keyword)
+  )
+
+  ipcMain.handle(CH.searchHistoryClear, () => prefs.clearSearchHistory())
 
   // 渲染层发现音源给了试听片段时会调这里：冷却该源 + 清掉这首歌的缓存
   ipcMain.handle(

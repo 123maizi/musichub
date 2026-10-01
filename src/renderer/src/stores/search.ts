@@ -5,6 +5,12 @@ import { defineStore } from 'pinia'
 import { computed, ref, shallowRef } from 'vue'
 import type { PlatformSearchResult, SearchChannel, Song } from '@shared/types/music'
 import { PLATFORM_META } from '@shared/constants'
+import {
+  DEFAULT_UI_PREFERENCES,
+  normalizeSearchEmptySource,
+  type SearchEmptySource,
+  type UiPreferences
+} from '@shared/types/preferences'
 import { cleanIpcError } from '../utils/format'
 
 /** 音源自带搜索通道是否可用由调用方决定，这里只负责跑请求 */
@@ -12,6 +18,59 @@ export const useSearchStore = defineStore('search', () => {
   const keyword = ref('')
   const loading = ref(false)
   const error = ref<string | null>(null)
+
+  /* ------------------------------------------------------------------ *
+   * 搜索页空态：「还没搜 / 搜了没结果」时显示哪一类歌
+   *
+   * 契约（main-lifecycle 的 task-12 落存储与设置项）：
+   *   读  window.api.prefs.get()              → 整份 UiPreferences
+   *   写  window.api.prefs.set({ field })     → 返回更新后的整份 UiPreferences
+   *   字段 searchEmptySource: 'history' | 'favorites' | 'playlist'，默认 'history'
+   * 每次进页面读一次、空态出现时再读一次即可，不需要订阅事件。
+   * ------------------------------------------------------------------ */
+  const emptySource = ref<SearchEmptySource>(DEFAULT_UI_PREFERENCES.searchEmptySource)
+
+  /**
+   * preload 上的偏好读写口。
+   *
+   * 这里写成结构化类型而不是直接用 window.api.prefs：task-12 的 preload 改动
+   * 还在落，先按契约把形状写死（CH.prefsGet / CH.prefsSet），
+   * 通道没就绪时 ?. 会直接短路，不会抛错也不会白屏。
+   */
+  type PrefsApi = {
+    prefs?: {
+      get?: () => Promise<UiPreferences | undefined>
+      set?: (patch: Partial<UiPreferences>) => Promise<UiPreferences | undefined>
+    }
+  }
+
+  /** 读一次偏好；通道未就绪时保持默认值 */
+  async function loadEmptySourcePref(): Promise<SearchEmptySource> {
+    try {
+      const prefs = await (window.api as unknown as PrefsApi).prefs?.get?.()
+      if (prefs) emptySource.value = normalizeSearchEmptySource(prefs.searchEmptySource)
+    } catch {
+      /* 通道还没落地 / 读取失败：保持当前值（默认 history） */
+    }
+    return emptySource.value
+  }
+
+  /**
+   * 切换空态来源。
+   * 先乐观更新（用户点了必须立刻看到变化），再用主进程返回值校正 ——
+   * 落盘是 400ms 防抖，但返回值是权威值，避免本地与磁盘不一致。
+   */
+  async function setEmptySource(next: SearchEmptySource): Promise<void> {
+    emptySource.value = normalizeSearchEmptySource(next)
+    try {
+      const updated = await (window.api as unknown as PrefsApi).prefs?.set?.({
+        searchEmptySource: emptySource.value
+      })
+      if (updated) emptySource.value = normalizeSearchEmptySource(updated.searchEmptySource)
+    } catch {
+      /* 落盘失败保留本地值：本次切换仍然生效 */
+    }
+  }
 
   /**
    * 各平台返回的原始结果。
@@ -222,6 +281,10 @@ export const useSearchStore = defineStore('search', () => {
     platformTabs,
     totalCount,
     failedPlatforms,
+    /* 空态来源（消费 task-12 的 searchEmptySource 偏好） */
+    emptySource,
+    loadEmptySourcePref,
+    setEmptySource,
     search,
     nextPage,
     clear,
