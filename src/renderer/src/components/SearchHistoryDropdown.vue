@@ -320,12 +320,26 @@ defineExpose({ reload, record, debugState })
     下拉这种东西关闭本来就该是瞬时的：动画只在**出现**时放一次，
     这样元素的移除完全不依赖 transitionend，也就不会有残留。
   -->
-  <div
-    v-if="open"
-    ref="rootEl"
-    class="history-pop u-rise-in"
-    :class="{ 'is-fixed': !!anchor }"
-    :style="boxStyle"
+  <!--
+    浮层必须 Teleport 到 body —— 这是**位置正确性**的要求，不是洁癖。
+
+    踩过的坑：下拉用 position:fixed + getBoundingClientRect 算坐标（视口坐标系），
+    看起来天经地义；但 CSS 规定「带 transform 的祖先会成为 fixed 子元素的包含块」。
+    而路由入场动画 `route-in` 的 keyframe 里带 translate3d，且 fill-mode 是 both
+    （动画填满状态一直保留），于是内容容器**永久**成了包含块 ——
+    fixed 的坐标被解释成「相对内容容器」，下拉整体右移 105px、下移 72px
+    （正好等于容器的视口偏移），跑到输入框外面去了。
+
+    挂到 body 之后，无论外层以后再加什么 transform / filter / will-change，
+    这个浮层都不会再被劫持。
+  -->
+  <Teleport to="body">
+    <div
+      v-if="open"
+      ref="rootEl"
+      class="history-pop u-rise-in"
+      :class="{ 'is-fixed': !!anchor }"
+      :style="boxStyle"
     role="listbox"
     aria-label="搜索历史"
   >
@@ -359,6 +373,7 @@ defineExpose({ reload, record, debugState })
         </button>
       </div>
     </div>
+  </Teleport>
 </template>
 
 <style scoped>

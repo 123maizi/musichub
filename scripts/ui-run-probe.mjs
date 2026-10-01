@@ -7,8 +7,8 @@
  * 用法：node scripts/ui-run-probe.mjs <port> <profileDir> <探针文件> [等音源秒数]
  */
 import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 
 const PORT = Number(process.argv[2] || 9432)
 const PROFILE = resolve(process.argv[3] || 'F:\\MusicHub\\.tmp-ui\\probe')
@@ -76,6 +76,35 @@ try {
 
   console.log(`等 ${WAIT_S}s（音源装载 + 首屏稳定）…`)
   await sleep(WAIT_S * 1000)
+
+  /* ---------- 环境自检：运行中的入口 chunk 必须与产物 index.html 一致 ---------- */
+  try {
+    const envRaw = execFileSync(
+      process.execPath,
+      ['scripts/cdp-run.mjs', String(PORT), 'scripts/ui-env-check.mjs'],
+      { cwd: CWD, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 60000 }
+    )
+    const env = JSON.parse(envRaw.slice(envRaw.indexOf('{')))
+    const htmlPath = join(APP_DIR, 'out', 'renderer', 'index.html')
+    const html = readFileSync(htmlPath, 'utf8')
+    const refs = [...html.matchAll(/assets\/([A-Za-z0-9_-]+\.js)/g)].map((m) => m[1])
+    const entry = env.steps.entryScripts ?? []
+    const consistent = refs.length > 0 && entry.some((e) => refs.includes(e))
+    console.log(
+      `[环境自检] 运行中入口=${entry.join(',') || '(无)'} | 产物 index.html 引用=${refs.join(',') || '(无)'}`
+    )
+    console.log(
+      consistent
+        ? '           → 一致 ✓（测的就是这一份构建）'
+        : '           → ✗ 不一致！多半连到了旧实例/旧构建（单实例锁会让新进程直接退出、旧进程继续服务）。下面的结论先别信。'
+    )
+    console.log(
+      `[环境自检] 外壳已渲染=${env.steps.hasShell} 顶栏标题=${env.steps.topbarTitle} 已加载 chunk 数=${(env.steps.loadedChunks ?? []).length}`
+    )
+    if (!consistent) process.exitCode = 3
+  } catch (err) {
+    console.log(`[环境自检] 跳过（${String(err.message).slice(0, 80)}）`)
+  }
 
   const r = execFileSync(
     process.execPath,

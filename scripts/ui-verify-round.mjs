@@ -16,7 +16,7 @@
  */
 import { spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
 const PORT = Number(process.argv[2] || 9431)
 const PROFILE = resolve(process.argv[3] || 'F:\\MusicHub\\.tmp-ui\\verify')
@@ -230,6 +230,24 @@ try {
   await goto('#/downloads')
 
   summary.windowTitle = page.title
+
+  /* ---------- 环境自检：运行中的入口 chunk 必须与产物 index.html 一致 ---------- */
+  try {
+    const envRun = runNode(['scripts/cdp-run.mjs', String(PORT), 'scripts/ui-env-check.mjs'], 60000)
+    const env = JSON.parse(envRun.out.slice(envRun.out.indexOf('{')))
+    const html = readFileSync(join(APP_DIR, 'out', 'renderer', 'index.html'), 'utf8')
+    const refs = [...html.matchAll(/assets\/([A-Za-z0-9_-]+\.js)/g)].map((m) => m[1])
+    const entry = env.steps.entryScripts ?? []
+    const consistent = refs.length > 0 && entry.some((e) => refs.includes(e))
+    summary.envCheck = { entry, refs, consistent, hasShell: env.steps.hasShell }
+    console.log(
+      `      环境自检 运行中入口=${entry.join(',')} | 产物引用=${refs.join(',')} → ${consistent ? '一致 ✓' : '✗ 不一致（旧实例/旧构建）'}`
+    )
+    if (!consistent) throw new Error('运行中的实例与产物不一致：多半连到了旧实例，请重启后重跑。')
+  } catch (err) {
+    if (String(err.message).includes('不一致')) throw err
+    console.log(`      环境自检 跳过（${String(err.message).slice(0, 60)}）`)
+  }
 
   // 等音源装载完成（搜索类用例需要）
   console.log('[0/6] 等音源装载…')
