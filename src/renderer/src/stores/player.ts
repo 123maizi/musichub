@@ -581,8 +581,19 @@ export const usePlayerStore = defineStore('player', () => {
     fragmentAttempts.value = 0
     // 重置音频上报的时长，真实值会在加载与播放过程中补上
     mediaDuration.value = 0
-    // 上一首的时长不能残留：重置后立刻让进度基准回落到新歌的元数据
-    bumpProgress(true)
+    /*
+     * 换歌必须把「位置」和「进度」一起清零 —— 不能走 bumpProgress(true)。
+     *
+     * 原来这里就是 bumpProgress(true)，但 force 的语义是「允许回退到 raw」，
+     * 而 raw 是用**尚未重置的 currentTime**（上一首播到的秒数）除以**新歌的时长**算出来的：
+     * 上一首播到 200s、新歌 269s → 进度条直接显示 74%，要等新歌第一次 timeupdate 才归零。
+     * 用户看到的正是「换歌了进度条还停在上一首的位置」。
+     *
+     * force 那条路是给「用户主动 seek / 换源落位」用的 —— 那种场景确实该落到 raw（目标位置）；
+     * 「换歌」要的是真归零。两件事语义不同，不该共用一个入口。
+     */
+    currentTime.value = 0
+    progress.value = 0
 
     try {
       const result = await getPlayUrl({ song, quality: quality.value })
