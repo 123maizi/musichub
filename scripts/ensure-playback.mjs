@@ -30,6 +30,15 @@ out.结果行数 = document.querySelectorAll('.results .row').length
 document.querySelector('.results .row .col-actions button[title="播放"]')?.click()
 await sleep(6000)
 
+// 必须切到正在播放页 —— 否则 input.seek 还没挂载，前面那次就是这样误判成「没找到」
+if (!location.hash.includes('now-playing')) {
+  location.hash = '#/now-playing'
+}
+for (let i = 0; i < 20; i += 1) {
+  await sleep(700)
+  if (document.querySelector('input.seek')) break
+}
+
 // 确认 seek 输入框状态
 const el = document.querySelector('input.seek')
 out.seek输入框 = el

@@ -53,6 +53,24 @@ async function railGo(label, waitMs = 1600) {
 // 先站到下载页：这样任务一入队，push 事件就能把行渲染出来
 await railGo('下载')
 
+/**
+ * 页面身份断言 —— 先证明「确实站在下载页」，再谈采样。
+ *
+ * 上一轮就栽在这：那一轮的下载页其实没挂上（前面的 acceptance 刚把页面带走），
+ * 于是「任务行找不到」，而任务在主进程里下得好好的（收了 47MB）——
+ * 报出来像是进度条坏了，其实是量错了页面。
+ */
+{
+  const text = document.body.innerText || ''
+  const onDownloads = text.includes('下载格式') || text.includes('还没有下载任务')
+  out.steps.viewIdentity = {
+    hash: location.hash,
+    onDownloads,
+    head: text.replace(/\s+/g, ' ').slice(0, 70)
+  }
+  if (!onDownloads) throw new Error('不在下载页：' + JSON.stringify(out.steps.viewIdentity))
+}
+
 const res = await window.api.search.search({ keyword: '晴天 周杰伦', limit: 12 })
 const all = res.platforms.flatMap((p) => p.songs || [])
 /**
@@ -168,18 +186,31 @@ out.steps.zeroProgressRule = (() => {
 const dts = samples.map((s) => s.dt).sort((a, b) => a - b)
 const q = (p) => (dts.length ? Number(dts[Math.min(dts.length - 1, Math.floor(dts.length * p))].toFixed(2)) : null)
 
-// 相邻帧填充宽度：回退帧要单独记下**那一帧的 transition 状态** ——
-// 这正是「向后跳必须瞬断、不能倒放」的判据：回退帧的 transitionDuration 应为 0s。
+// 相邻帧填充宽度。这里要把两种「宽度变小」分开：
+//   · 真实进度回退：百分比也变小了（换源丢弃残留 / 重试重下）—— 必须瞬断，绝不能倒放
+//   · 轨道变窄：任务下完的同一帧里行内按钮变多，1fr 那一列变窄，
+//     于是「轨道宽 × scale」的乘积暂时小于上一帧，而百分比其实是涨的。
+//     这不是进度回退，上一版把它算进「回退帧」里，读数看起来像出了 bug。
+const pctNum = (s) => {
+  const m = /([\d.]+)\s*%/.exec(s.pct || '')
+  return m ? Number(m[1]) : null
+}
 let backFrames = 0
 let steppedFrames = 0
+let rewindFrames = 0
 const backSteps = []
 const widths = samples.map((s) => s.px)
 for (let i = 1; i < widths.length; i += 1) {
   const d = Number((widths[i] - widths[i - 1]).toFixed(3))
   if (d < -0.05) {
     backFrames += 1
+    const before = pctNum(samples[i - 1])
+    const after = pctNum(samples[i])
+    const isRewind = before !== null && after !== null && after + 0.05 < before
+    if (isRewind) rewindFrames += 1
     if (backSteps.length < 12) {
       backSteps.push({
+        类型: isRewind ? '进度回退' : '轨道变窄（同帧按钮变化）',
         从: Number(widths[i - 1].toFixed(1)),
         到: Number(widths[i].toFixed(1)),
         百分比: samples[i - 1].pct + ' → ' + samples[i].pct,
@@ -193,6 +224,7 @@ for (let i = 1; i < widths.length; i += 1) {
 }
 const pcts = samples.map((s) => s.pct)
 const distinctPct = [...new Set(pcts)]
+const rewindDetails = backSteps.filter((b) => b.类型 === '进度回退')
 
 out.aggregates = {
   帧数: samples.length,
@@ -204,8 +236,10 @@ out.aggregates = {
   超过50ms的帧数: dts.filter((d) => d > 50).length,
   填充宽度_前进帧: steppedFrames,
   填充宽度_回退帧: backFrames,
+  /** 真·进度回退帧（百分比确实变小了）：这才是「倒放」的判据 */
+  真实进度回退帧: rewindFrames,
   回退帧明细: backSteps,
-  回退帧是否都是瞬断: backSteps.every((b) => b.transitionDuration === '0s'),
+  回退帧是否都是瞬断: rewindDetails.every((b) => b.transitionDuration === '0s'),
   填充宽度_min: widths.length ? Math.min(...widths) : null,
   填充宽度_max: widths.length ? Math.max(...widths) : null,
   百分比读数种类: distinctPct.length,

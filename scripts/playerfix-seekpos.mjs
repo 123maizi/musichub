@@ -54,6 +54,64 @@ try {
   /* ignore */
 }
 
+/* ── 输出头：build id（全队要求）────────────────────────────────────
+ * 这组数字属于哪个构建必须一眼可查 —— 我们被「半新半旧构建产物」骗过一次。 */
+let BUILD = { indexMtime: '?', entry: '?' }
+try {
+  const { statSync, readFileSync } = await import('node:fs')
+  const idx = 'out/renderer/index.html'
+  BUILD.indexMtime = statSync(idx).mtime.toISOString()
+  BUILD.entry = (/assets\/(index-[^"]+\.js)/.exec(readFileSync(idx, 'utf8')) ?? [])[1] ?? '?'
+} catch {
+  /* 读不到构建信息也不要因此不出数 */
+}
+
+/* ── 前置条件断言：不满足就拒绝出数 ────────────────────────────────
+ * 为什么必须硬拦：没有歌在播时 duration=0 → 原生 range 处于 **disabled**，
+ * 点它/拖它**不会派发 input 事件**，填充只随播放缓慢前进 —— 在 270px 轨道上
+ * 会被读成「误差随位置线性拉大 + 大量回弹帧」，伪装成产品回归。
+ * 实测对照：有歌 +1.42/−1.31/+3.76px、回弹 0；没歌 −11~−14/−76/−141px、回弹 147~159。
+ * 这类假数据已经骗过三个人三次（还叠着半新半旧构建、隐藏窗口 rAF 停摆两个陷阱）。 */
+const guard = JSON.parse(
+  await evaluate(`(async () => {
+    const el = document.querySelector('input.seek')
+    const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia
+    const player = pinia._s.get('player')
+    let frames = 0
+    const t0 = performance.now()
+    await new Promise((resolve) => {
+      const tick = () => {
+        frames += 1
+        if (performance.now() - t0 < 600) requestAnimationFrame(tick)
+        else resolve()
+      }
+      requestAnimationFrame(tick)
+    })
+    return JSON.stringify({
+      hidden: document.hidden,
+      rafFrames600ms: frames,
+      hasInput: !!el,
+      disabled: el ? el.disabled : null,
+      max: el ? el.max : null,
+      step: el ? el.step : null,
+      duration: +player.duration.toFixed(1),
+      playing: player.playing,
+      current: player.current ? player.current.name : null
+    })
+  })()`)
+)
+
+const problems = []
+if (guard.hidden) problems.push('document.hidden=true（窗口不可见，rAF 会停摆）')
+if (guard.rafFrames600ms <= 10) problems.push(`600ms 内 rAF 仅 ${guard.rafFrames600ms} 帧（环境不可信）`)
+if (!guard.hasInput) problems.push('找不到 input.seek')
+if (guard.disabled) problems.push(`input.seek 处于 disabled（没有歌曲在播，duration=${guard.duration}）`)
+if (guard.max !== null && Number(guard.max) <= 0) problems.push(`input.seek 的 max=${guard.max}（时长未知）`)
+if (problems.length > 0) {
+  console.error(JSON.stringify({ 拒绝出数: true, 原因: problems, 构建: BUILD, 现场: guard }, null, 1))
+  process.exit(3)
+}
+
 /* 准备：播一首并进正在播放页 */
 const prep = await evaluate(`(async () => {
   const pinia = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia
