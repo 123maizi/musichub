@@ -23,6 +23,14 @@ const pop = () => document.querySelector(POP)
 const rows = () => [...document.querySelectorAll(POP + ' .row')]
 const words = () => rows().map((r) => (r.querySelector('.word')?.textContent || '').trim())
 
+/** 页面里到底有几个组件实例 / 几个浮层：重复挂载会让「第一个」与「可见的那个」不是同一个 */
+const instances = () => ({
+  states: document.querySelectorAll('.hist-state').length,
+  pops: document.querySelectorAll(POP).length,
+  searchInputs: document.querySelectorAll('.search-box input').length,
+  searchViews: document.querySelectorAll('.view').length
+})
+
 /* ---------- 0. 铺一个已知历史 ---------- */
 await window.api.prefs.clearSearchHistory()
 await window.api.prefs.addSearchHistory('周杰伦')
@@ -56,20 +64,45 @@ if (!input) {
 out.steps.inputSelector =
   input.className || input.getAttribute('placeholder') || input.type
 
-// 清空输入（空态更容易让父组件展开历史）
-input.focus()
-input.value = ''
-input.dispatchEvent(new Event('input', { bubbles: true }))
-input.dispatchEvent(new Event('focus', { bubbles: true }))
-await sleep(900)
+/** 组件把内部状态挂在 .hist-state 上，失败时直接把它带回来，省得再猜 */
+function histState() {
+  const el = document.querySelector('.hist-state')
+  if (!el) return null
+  const o = {}
+  for (const a of el.attributes) if (a.name.startsWith('data-')) o[a.name] = a.value
+  return o
+}
 
-if (!pop()) {
+/**
+ * 展开下拉。
+ *
+ * 不能「发一次事件等 900ms 就断言」——实测会偶发拿不到（首帧时主进程正忙，
+ * 读历史的 IPC 慢一点就错过了这一次采样）。这里改成轮询 + 反复补发事件，
+ * 最多等 6 秒；真失败时把组件内部状态一并报出来，能直接分清是
+ * 「父组件没让展开（data-visible=false）」还是「展开了但没数据（data-count=0）」。
+ */
+async function openDropdown(timeoutMs = 6000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    input.focus()
+    input.value = ''
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('focus', { bubbles: true }))
+    await sleep(300)
+    if (pop()) return true
+  }
+  return false
+}
+
+if (!(await openDropdown())) {
   out.checks = checks
   out.pass = false
   out.notMounted = true
+  out.componentState = histState()
   out.error =
-    '历史下拉没有出现：组件可能还没挂进 SearchView（方案 b 需要 render-perf 加一行），' +
-    '或父组件的展开条件与「聚焦 + 空输入」不同。这不是存储层的问题 —— 存储层 13 项已单独验过。'
+    '历史下拉 6 秒内没有出现。组件内部状态: ' +
+    JSON.stringify(out.componentState) +
+    '（data-visible=false → 父组件没让展开；data-count=0 → 读历史失败或为空）'
   return out
 }
 
@@ -80,15 +113,21 @@ check('下拉列出历史且最新在前', JSON.stringify(list0.slice(0, 3)) ===
 
 const rowH = rows()[0]?.getBoundingClientRect().height ?? 0
 out.steps.rowHeight = rowH
-check('行命中区 ≥24px', rowH >= 24, rowH)
+check('行命中区 ≥24px', Math.round(rowH) >= 24, rowH)
 
 const delBox = document.querySelector(POP + ' .del')?.getBoundingClientRect()
 out.steps.delHit = delBox ? `${Math.round(delBox.width)}x${Math.round(delBox.height)}` : null
-check('删除按钮命中区 ≥24px', !!delBox && delBox.width >= 24 && delBox.height >= 24, out.steps.delHit)
+// 用四舍五入比较：getBoundingClientRect 会给出 23.996 这种亚像素值，
+// 直接 >=24 会把「实际就是 24px」误判成不达标
+check(
+  '删除按钮命中区 ≥24px',
+  !!delBox && Math.round(delBox.width) >= 24 && Math.round(delBox.height) >= 24,
+  out.steps.delHit
+)
 
 const clearBox = document.querySelector(POP + ' .clear')?.getBoundingClientRect()
 out.steps.clearHit = clearBox ? `${Math.round(clearBox.width)}x${Math.round(clearBox.height)}` : null
-check('清空按钮命中区 ≥24px', !!clearBox && clearBox.height >= 24, out.steps.clearHit)
+check('清空按钮命中区 ≥24px', !!clearBox && Math.round(clearBox.height) >= 24, out.steps.clearHit)
 
 /* ---------- 3. 键盘 ↑ ↓ ---------- */
 const key = (k) => input.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }))
@@ -154,22 +193,29 @@ if (pop()) {
 input.focus()
 input.value = ''
 input.dispatchEvent(new Event('input', { bubbles: true }))
+input.dispatchEvent(new Event('focus', { bubbles: true }))
 await sleep(700)
 const openBeforeOutside = Boolean(pop())
 document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }))
-await sleep(600)
-out.steps.outsideClick = { openBefore: openBeforeOutside, openAfter: Boolean(pop()) }
+await sleep(700)
+out.steps.outsideClick = {
+  openBefore: openBeforeOutside,
+  openAfter: Boolean(pop()),
+  stateAfter: histState(),
+  instances: instances()
+}
 check('点页面其它地方会关闭', openBeforeOutside && !pop(), out.steps.outsideClick)
 
 /* ---------- 7. Esc 关闭 ---------- */
 input.focus()
 input.value = ''
 input.dispatchEvent(new Event('input', { bubbles: true }))
+input.dispatchEvent(new Event('focus', { bubbles: true }))
 await sleep(700)
 const openBeforeEsc = Boolean(pop())
 key('Escape')
-await sleep(600)
-out.steps.esc = { openBefore: openBeforeEsc, openAfter: Boolean(pop()) }
+await sleep(700)
+out.steps.esc = { openBefore: openBeforeEsc, openAfter: Boolean(pop()), stateAfter: histState(), instances: instances() }
 check('Esc 关闭', openBeforeEsc && !pop(), out.steps.esc)
 
 /* ---------- 8. 清空全部 ---------- */

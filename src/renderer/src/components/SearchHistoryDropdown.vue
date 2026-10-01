@@ -45,6 +45,10 @@ const emit = defineEmits<{
 
 const history = ref<string[]>([])
 const loading = ref(false)
+const loadError = ref('')
+/** 诊断：reload 被调了几次、拿回来的原始值是什么（验证时靠它定位，不影响功能） */
+const reloadCount = ref(0)
+const rawSeen = ref('')
 const activeIndex = ref(-1)
 const rootEl = ref<HTMLElement | null>(null)
 
@@ -59,12 +63,17 @@ const items = computed(() => {
 const open = computed(() => props.visible && !loading.value && items.value.length > 0)
 
 async function reload(): Promise<void> {
+  reloadCount.value += 1
   try {
     loading.value = true
+    loadError.value = ''
     const prefs = await window.api.prefs.get()
+    rawSeen.value = String(JSON.stringify(prefs)).slice(0, 120)
     history.value = Array.isArray(prefs?.searchHistory) ? prefs.searchHistory : []
-  } catch {
-    // 读不到历史就当作没有：绝不能因为它把搜索框弄坏
+  } catch (err) {
+    // 读不到历史就当作没有：绝不能因为它把搜索框弄坏。
+    // 但要把原因留下来 —— 否则「历史永远是空的」这种问题无从查起。
+    loadError.value = err instanceof Error ? err.message : String(err)
     history.value = []
   } finally {
     loading.value = false
@@ -195,6 +204,47 @@ watch(
   }
 )
 
+/* ------------------------------ 数据加载 ------------------------------ */
+
+/**
+ * 什么时候重新读历史 —— 这里踩过一个真坑，记下来：
+ *
+ * 只监听 `visible` 的**变化**是不够的。父组件的展开入口是
+ * `@focus/@click/@input="openHistory"`，而它做的是 `showHistory.value = true`；
+ * 如果这个值**已经是 true**（例如应用启动时搜索框就被自动聚焦、面板一直开着），
+ * 再点一次搜索框不会产生任何变化 → watch 不触发 → 列表停留在上一次读到的内容。
+ * 表现出来就是：「聚焦了、面板也开着，但历史是空的/是旧的」。
+ *
+ * 所以除了 watch，还直接盯住**锚点自身**的 focus / click —— 那才是「用户想看历史了」
+ * 的真实信号，与父组件的状态机无关。不监听 input：那是每次键入都会触发的，
+ * 而键入只影响客户端过滤，不会产生新的历史条目，没必要每次都打一次 IPC。
+ */
+let anchorEl: HTMLElement | null = null
+const onAnchorIntent = (): void => {
+  void reload()
+}
+
+function attachAnchor(el: HTMLElement | null): void {
+  detachAnchor()
+  if (!el) return
+  anchorEl = el
+  el.addEventListener('focus', onAnchorIntent)
+  el.addEventListener('click', onAnchorIntent)
+}
+
+function detachAnchor(): void {
+  if (!anchorEl) return
+  anchorEl.removeEventListener('focus', onAnchorIntent)
+  anchorEl.removeEventListener('click', onAnchorIntent)
+  anchorEl = null
+}
+
+watch(
+  () => props.anchor,
+  (el) => attachAnchor(el ?? null),
+  { immediate: true }
+)
+
 watch(
   () => props.visible,
   (v) => {
@@ -208,6 +258,14 @@ watch(
 )
 
 onMounted(() => {
+  /**
+   * 挂载时也要主动读一次。
+   *
+   * 踩过的坑：SearchView 在 onMounted 里就 `inputEl.focus()`，所以下拉组件挂载时
+   * `visible` 可能已经是 true —— watch 只在「变化」时触发，永远不响，历史一直是空的。
+   * 读一次只是一次 IPC，代价可以忽略，换来的是不依赖父组件的时序。
+   */
+  void reload()
   window.addEventListener('keydown', onKeydown, true)
   window.addEventListener('pointerdown', onPointerDown, true)
   window.addEventListener('resize', reposition)
@@ -215,6 +273,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  detachAnchor()
   window.removeEventListener('keydown', onKeydown, true)
   window.removeEventListener('pointerdown', onPointerDown, true)
   window.removeEventListener('resize', reposition)
@@ -232,16 +291,44 @@ defineExpose({ reload, record, debugState })
 </script>
 
 <template>
-  <Transition name="pop">
-    <div
-      v-if="open"
-      ref="rootEl"
-      class="history-pop"
-      :class="{ 'is-fixed': !!anchor }"
-      :style="boxStyle"
-      role="listbox"
-      aria-label="搜索历史"
-    >
+  <!--
+    测试钩子：一个永不参与布局的隐藏标记，把组件内部状态暴露给验证探针。
+    为什么需要它：浮层在「不可见」时什么都不渲染，光看 DOM 分不清
+    「父组件没让展开（visible=false）」和「展开了但没有可选项（count=0）」——
+    这两种情况的排查方向完全相反。display:none 不影响布局，代价可以忽略。
+  -->
+  <span
+    class="hist-state"
+    hidden
+    :data-visible="String(visible)"
+    :data-open="String(open)"
+    :data-count="items.length"
+    :data-total="history.length"
+    :data-loading="String(loading)"
+    :data-err="loadError"
+    :data-reloads="String(reloadCount)"
+    :data-raw="rawSeen"
+    :data-query="query"
+    :data-active="String(activeIndex)"
+  />
+
+  <!--
+    入场用**一次性 CSS 动画**（motion.css 的 .u-rise-in），不用 <Transition>。
+    为什么：实测发现 <Transition name="pop"> 的离开过渡会「卡住」——
+    组件状态已经是 open=false，.history-pop 却留在 DOM 里不走，
+    变成一个盖在页面上的幽灵浮层（点外关闭与 Esc 都表现为「关不掉」）。
+    下拉这种东西关闭本来就该是瞬时的：动画只在**出现**时放一次，
+    这样元素的移除完全不依赖 transitionend，也就不会有残留。
+  -->
+  <div
+    v-if="open"
+    ref="rootEl"
+    class="history-pop u-rise-in"
+    :class="{ 'is-fixed': !!anchor }"
+    :style="boxStyle"
+    role="listbox"
+    aria-label="搜索历史"
+  >
       <div class="head">
         <span class="head-label">搜索历史</span>
         <button class="clear" type="button" title="清空搜索历史" @click="clearAll">清空全部</button>
@@ -272,7 +359,6 @@ defineExpose({ reload, record, debugState })
         </button>
       </div>
     </div>
-  </Transition>
 </template>
 
 <style scoped>
