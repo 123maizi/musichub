@@ -321,7 +321,24 @@ function onSeekKeydown(event: KeyboardEvent): void {
   if (keys.includes(event.key)) syncSeekInput()
 }
 
-watch(() => player.current?.id, syncSeekInput)
+/**
+ * 换歌时必须把「钉住的目标位置」清掉。
+ *
+ * pendingSeek 是为「拖动/点击后等 store 追上」设计的，最长保持 600ms。
+ * 如果在它还没释放时换了歌，displayProgress 会优先返回这个旧目标，
+ * 界面就停在上一次的百分比上 —— 这是「切歌了进度条没归零」的另一个来源。
+ */
+watch(
+  () => player.current?.id,
+  () => {
+    pendingSeek.value = null
+    if (pendingTimer) {
+      clearTimeout(pendingTimer)
+      pendingTimer = null
+    }
+    syncSeekInput()
+  }
+)
 watch(() => player.playing, syncSeekInput)
 
 const displayTime = computed(() =>

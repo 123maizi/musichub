@@ -119,8 +119,23 @@ function onSeekKeydown(event: KeyboardEvent): void {
   if (keys.includes(event.key)) syncSeekInput()
 }
 
-/** 换歌 / 播放状态变化时把基准跟上（这两个时机频率极低） */
-watch(() => player.current?.id, syncSeekInput)
+/**
+ * 换歌 / 播放状态变化时把基准跟上（这两个时机频率极低）。
+ *
+ * 换歌时还要清掉 pendingSeek：它是「拖动后等 store 追上」用的钉住值，
+ * 最长保持 600ms；不清的话它会优先于真实进度，界面就停在上一首的百分比上。
+ */
+watch(
+  () => player.current?.id,
+  () => {
+    pendingSeek.value = null
+    if (pendingTimer) {
+      clearTimeout(pendingTimer)
+      pendingTimer = null
+    }
+    syncSeekInput()
+  }
+)
 watch(() => player.playing, syncSeekInput)
 
 onMounted(() => {

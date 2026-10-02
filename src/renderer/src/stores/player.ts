@@ -163,6 +163,19 @@ export const usePlayerStore = defineStore('player', () => {
     if (force || raw > progress.value) progress.value = raw
   }
 
+  /**
+   * 「正在换歌、新流还没接上」的窗口期。
+   *
+   * 为什么必须有这个标记：换歌时我们先清空进度，然后 **await 取流**（网络 + 选源，
+   * 可能持续几百毫秒到几秒），这之后才 `el.src = 新地址`。在这段窗口里**旧音频还在播**，
+   * `timeupdate` 会持续按上一首的秒数上报 —— 而 reportTime 的单调守卫只挡「回退」，
+   * 刚清零的 currentTime 让任何值都算「前进」，于是进度被顶回上一首的位置。
+   * 用户看到的就是「切歌了进度条还停在上一首」。
+   *
+   * 所以：换歌期间停掉旧流 + 一律不采信时间上报，直到新流接上。
+   */
+  let awaitingStream = false
+
   /** 允许的进度回退容差（秒）：抹掉流重载、时长微调造成的亚秒级抖动 */
   const TIME_BACK_TOLERANCE = 0.75
 
@@ -415,11 +428,20 @@ export const usePlayerStore = defineStore('player', () => {
     }
 
     el.addEventListener('timeupdate', () => {
+      /**
+       * 换歌取流期间，元素上报的还是**上一首**的秒数 —— 一律不采信。
+       * 这里没有用 playToken 比较，是因为 Audio 元素是复用的单例、
+       * 监听器只注册一次，捕获到的 token 早已过期，比了也没意义；
+       * 用一个显式的窗口期标记反而更准（它精确覆盖「已清零、新流未接上」这段）。
+       */
+      if (awaitingStream) return
       reportTime(el.currentTime)
       // 顺带兜底：有些音源要播一会儿才报出真实时长
       syncDuration()
     })
     el.addEventListener('loadedmetadata', () => {
+      // 新流的元数据到了，窗口期结束，此后上报的时间属于新歌
+      awaitingStream = false
       syncDuration()
       // 拿到元数据就校验时长：太短说明是试听片段，立刻换源，别等用户听半截
       void verifyDuration()
@@ -594,6 +616,19 @@ export const usePlayerStore = defineStore('player', () => {
      */
     currentTime.value = 0
     progress.value = 0
+    /*
+     * 立刻停掉旧流并进入「换歌窗口期」。
+     *
+     * 不能只清零就完事：后面要 await 取流，而取流期间旧音频一直在播、
+     * 一直按上一首的秒数上报，会把刚清零的进度顶回去（用户报的就是这个）。
+     * 同时停掉旧流也符合直觉 —— 点了另一首歌，上一首不该还在响。
+     */
+    awaitingStream = true
+    try {
+      ensureAudio().pause()
+    } catch {
+      /* 元素还没就绪时忽略：真正要紧的是那个标记 */
+    }
 
     try {
       const result = await getPlayUrl({ song, quality: quality.value })
@@ -621,7 +656,18 @@ export const usePlayerStore = defineStore('player', () => {
       error.value = cleanIpcError(err)
       playing.value = false
     } finally {
-      if (token === playToken) loading.value = false
+      /**
+       * 只有「当前这一代」才有资格结束窗口期。
+       *
+       * 这里必须放 finally：取流抛错、play() 被拒绝（比如自动播放策略）时也要放行，
+       * 否则 awaitingStream 会永远为 true，进度条从此彻底不动 —— 那比原来的 bug 更糟。
+       * 同时用 token 守住：如果期间用户又点了别的歌，新一代已经自己开了新的窗口期，
+       * 旧一代不能把它关掉。
+       */
+      if (token === playToken) {
+        loading.value = false
+        awaitingStream = false
+      }
     }
   }
 
