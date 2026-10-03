@@ -28,6 +28,8 @@ export const CH = {
   // 播放
   playGetUrl: 'play:getUrl',
   playGetLyric: 'play:getLyric',
+  /** 收集各平台「本来就翻好的」官方翻译歌词（省掉自己跑 AI 的时间） */
+  playLyricTranslations: 'play:lyricTranslations',
   /** 歌词翻译（外语歌没有官方翻译时，一键翻成中文） */
   playTranslateLyric: 'play:translateLyric',
   playProbe: 'play:probe',

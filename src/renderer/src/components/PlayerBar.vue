@@ -284,6 +284,26 @@ function openPlaylistMenu(event: MouseEvent): void {
       />
     </div>
 
+    <!--
+      只读状态出口：把进度条内部的几个状态摊给验证探针。
+
+      为什么需要它：界面上的表现只有「条子不动」，但可能的原因有四个 ——
+      seeking 卡住、pendingSeek 没释放、progress 没涨、duration 为 0。
+      这四个的修法完全不同，光看 DOM 分辨不出来。hidden 不参与布局，代价可忽略。
+    -->
+    <span
+      class="pb-state"
+      hidden
+      :data-seeking="String(seeking)"
+      :data-seek-value="String(seekValue)"
+      :data-pending="pendingSeek === null ? 'null' : String(pendingSeek)"
+      :data-progress="String(player.progress)"
+      :data-current="String(player.currentTime)"
+      :data-duration="String(player.duration)"
+      :data-display="String(displayProgress)"
+      :data-playing="String(player.playing)"
+    />
+
     <div class="bar-body">
       <!-- 左：当前曲目（点击进入正在播放页） -->
       <router-link

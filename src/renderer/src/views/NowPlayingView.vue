@@ -645,6 +645,24 @@ async function saveCover(): Promise<void> {
             <span>清除</span>
           </button>
 
+          <!--
+            现成的官方翻译：各平台本来就有译文，直接拿来用，不必自己跑 AI。
+            这些选项是异步收集的，拿不到就不显示这一组 —— 上方「翻译歌词」照旧可用。
+          -->
+          <template v-if="player.translationOptions.length > 0">
+            <span class="trans-pick-label">现成译文</span>
+            <button
+              v-for="opt in player.translationOptions"
+              :key="opt.id"
+              class="translate-btn"
+              :class="{ on: player.activeTranslationId === opt.id }"
+              :title="`用 ${opt.platform} 的官方翻译（不用等 AI，直接可用）`"
+              @click="player.applyTranslationOption(opt.id)"
+            >
+              {{ opt.platform }}
+            </button>
+          </template>
+
           <span v-if="player.savedEdited" class="translate-note">已手工修改</span>
           <span v-else-if="providerLabel" class="translate-note">{{ providerLabel }}</span>
           <span v-if="player.translateError" class="translate-note ellipsis">
@@ -1190,6 +1208,14 @@ async function saveCover(): Promise<void> {
   gap: var(--sp-3);
   padding: 0 var(--sp-3) var(--sp-2);
   flex: none;
+}
+
+/* 「现成译文」是分组标签，不是按钮 */
+.trans-pick-label {
+  font-size: var(--fs-xs);
+  color: var(--ink-subtle);
+  letter-spacing: var(--ls-wide);
+  margin-left: var(--sp-2);
 }
 
 .translate-btn {

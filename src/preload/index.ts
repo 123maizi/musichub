@@ -79,6 +79,16 @@ const api = {
     getLyric: (song: Song, sourceIds?: string[]) =>
       invoke(CH.playGetLyric, song, sourceIds) as Promise<Lyric | null>,
     /**
+     * 收集各平台现有的官方翻译歌词。
+     *
+     * 比起本地 AI 翻译，这条路不用等模型、不消耗算力，官方译文质量通常也更好。
+     * 拿不到就返回空数组（界面照旧提供 AI 翻译），不影响任何既有流程。
+     */
+    getLyricTranslations: (song: Song) =>
+      invoke(CH.playLyricTranslations, song) as Promise<
+        Array<{ id: string; label: string; platform: string; tlyric: string }>
+      >,
+    /**
      * 歌词翻译（外语歌没有官方翻译时用）。
      * 带上 song 是为了把歌名/歌手/专辑一并告诉 AI —— 模型知道在翻哪首歌，
      * 人名与专有名词会准得多。

@@ -613,6 +613,9 @@ export const usePlayerStore = defineStore('player', () => {
     savedEdited.value = false
     savedProvider.value = ''
     savedProviderName.value = ''
+    // 上一首的官方翻译选项不能带过来
+    translationOptions.value = []
+    activeTranslationId.value = ''
     // 切歌时把编辑器关掉，免得把上一首的编辑内容留在界面上
     editing.value = false
     editLines.value = []
@@ -700,6 +703,64 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  /* ------------------------------ 现成的官方翻译 ------------------------------ */
+
+  /** 各平台「本来就翻好的」译文（QQ / 网易云…），拿不到就是空数组 */
+  const translationOptions = ref<
+    Array<{ id: string; label: string; platform: string; tlyric: string }>
+  >([])
+  /** 当前正在用的那一份（'' = 没译文，用 AI 时由既有流程改 savedProvider） */
+  const activeTranslationId = ref('')
+
+  /**
+   * 应用某一份官方翻译；传空串表示关闭译文、回到原文。
+   *
+   * 主歌词始终取自 lyricRaw —— 切换译文只换「翻译」这一层，
+   * 不会重新去拉歌词，所以是瞬时的，也不会因为切平台而丢掉手工编辑过的内容。
+   */
+  function applyTranslationOption(id: string): void {
+    const main = lyricRaw.value?.lyric || lyricRaw.value?.lxlyric || ''
+    if (!main) return
+    activeTranslationId.value = id
+    const opt = translationOptions.value.find((o) => o.id === id)
+    if (!opt) {
+      lyricLines.value = parseLrcWithTranslation(main, undefined)
+      translated.value = false
+      translatedSongId.value = ''
+      savedProvider.value = ''
+      savedProviderName.value = ''
+      return
+    }
+    lyricLines.value = parseLrcWithTranslation(main, opt.tlyric)
+    translated.value = lyricLines.value.some((line) => !!line.trans)
+    translatedSongId.value = translated.value ? (current.value?.id ?? '') : ''
+    savedProvider.value = 'official'
+    savedProviderName.value = opt.platform
+  }
+
+  /**
+   * 收集官方翻译选项。
+   *
+   * 与 AI 翻译是互补关系：这里拿的是平台**现成**的译文，不用等模型、不消耗算力，
+   * 而且官方译文质量通常更好。所以**拿到就自动用第一份**（QQ 优先），
+   * 用户什么都不用做就有译文；不满意再在界面上换成别的平台，或改用 AI。
+   *
+   * 自动应用的条件很克制：只在「当前还没有译文、且用户没手工编辑过」时生效 ——
+   * 绝不覆盖用户已有的选择。
+   */
+  async function loadTranslationOptions(song: Song): Promise<void> {
+    try {
+      const list = await window.api.player.getLyricTranslations(song)
+      if (current.value?.id !== song.id) return
+      translationOptions.value = Array.isArray(list) ? list : []
+      if (translationOptions.value.length > 0 && !translated.value && !savedEdited.value) {
+        applyTranslationOption(translationOptions.value[0].id)
+      }
+    } catch {
+      /* 拿不到就算了：界面照旧提供 AI 翻译，不影响任何既有流程 */
+    }
+  }
+
   /** 取歌词 */
   async function loadLyric(song: Song): Promise<void> {
     try {
@@ -734,6 +795,12 @@ export const usePlayerStore = defineStore('player', () => {
           savedProviderName.value = saved.providerName ?? ''
         }
       }
+
+      /*
+       * 顺便收集各平台现成的官方翻译。
+       * 放在最后：它只是「锦上添花」，慢一点、失败都不该影响歌词本身已经显示出来。
+       */
+      void loadTranslationOptions(song)
     } catch {
       // 已经切歌了就别动界面上的歌词：这次失败属于上一首
       if (current.value?.id !== song.id) return
@@ -1183,6 +1250,10 @@ export const usePlayerStore = defineStore('player', () => {
     savedEdited,
     savedProvider,
     savedProviderName,
+    // 现成的官方翻译（多平台可选）
+    translationOptions,
+    activeTranslationId,
+    applyTranslationOption,
     editing,
     editLines,
     savingEdit,

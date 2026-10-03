@@ -22,6 +22,7 @@ import type { StreamProxy } from '@main/core/proxy/stream-proxy'
 import { probeUrl } from '@main/core/net/http'
 import { downloadCoverTo, resolveCover } from '@main/core/cover'
 import { detectSourceLang, translateLrcDetailed, translateLrcWithAi } from '@main/core/lyric/translate'
+import { fetchOfficialTranslations } from '@main/core/lyric'
 import { testAiConnection } from '@main/core/lyric/ai-translate'
 
 // 通道名唯一定义源在 shared 层，这里引入并原样再导出给外部引用
@@ -112,6 +113,14 @@ export function registerIpc(ctx: IpcContext): () => void {
   ipcMain.handle(CH.playGetLyric, (_e, song: Song, sourceIds?: string[]) =>
     resolver.getLyric(song, sourceIds)
   )
+
+  /**
+   * 收集各平台的官方翻译歌词。
+   *
+   * 与「AI 翻译」是互补关系：这里拿的是平台**本来就有**的现成译文，不用等模型、
+   * 不消耗算力，而且官方译文质量通常更好。拿不到就返回空数组，界面照旧提供 AI 翻译。
+   */
+  ipcMain.handle(CH.playLyricTranslations, (_e, song: Song) => fetchOfficialTranslations(song))
 
   /**
    * 歌词翻译：源语言自动探测，失败原因如实回报，绝不把原文当译文返回。

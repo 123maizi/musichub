@@ -264,3 +264,94 @@ export async function fetchBuiltinLyric(song: Song): Promise<Lyric | null> {
     return null
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * 官方翻译歌词：从各平台收集「本来就翻好的」译文
+ * ------------------------------------------------------------------ */
+
+/**
+ * 一个来自平台的现成译文。
+ *
+ * 为什么要有这东西：用户以前只能靠本地 AI 翻译，每次都要等模型跑一遍，
+ * 既慢又费算力。但 QQ 与网易云的歌词接口**本身就带官方翻译**（歌手/平台官方做的），
+ * 质量通常还比机器翻译好。所以这里把它们收集起来，交给用户挑。
+ */
+export interface OfficialTranslation {
+  /** 稳定标识（平台名），渲染层用它当选项 key */
+  id: string
+  /** 展示名，例如「官方翻译 · QQ音乐」 */
+  label: string
+  platform: string
+  /** LRC 格式的译文（与主歌词逐行对齐） */
+  tlyric: string
+}
+
+/** QQ 的官方翻译：一次请求同时拿到主歌词与翻译，这里只取翻译 */
+async function translationFromQQ(song: Song): Promise<OfficialTranslation | null> {
+  const keyword = buildKeyword(song)
+  if (!keyword) return null
+
+  const searchRes = await httpRequest(
+    `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?p=1&n=3` +
+      `&w=${encodeURIComponent(keyword)}&format=json&cr=1`,
+    {
+      method: 'GET',
+      headers: { Referer: 'https://y.qq.com/', 'User-Agent': DEFAULT_UA, Accept: 'application/json' },
+      timeout: 6000
+    }
+  )
+  const list = asArr(asObj(asObj(asObj(unwrapJsonp(searchRes.body)).data).song).list)
+  const picked = pickBestSongItem(list, song.name, song.singer)
+  const mid = str(picked?.mid) || str(picked?.songmid)
+  if (!mid) return null
+
+  const lyricRes = await httpRequest(
+    `https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${encodeURIComponent(mid)}` +
+      `&format=json&nobase64=1&g_tk=5381&loginUin=0&hostUin=0` +
+      `&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0`,
+    { method: 'GET', headers: QQ_HEADERS, timeout: 6000 }
+  )
+  const trans = decodeEntities(str(asObj(unwrapJsonp(lyricRes.body)).trans))
+  if (!trans.trim()) return null
+  return { id: 'qq', label: '官方翻译 · QQ音乐', platform: 'QQ音乐', tlyric: trans }
+}
+
+/** 网易云的官方翻译（tlyric） */
+async function translationFromNetease(song: Song): Promise<OfficialTranslation | null> {
+  const keyword = buildKeyword(song)
+  if (!keyword) return null
+
+  const searchRes = await httpRequest('https://music.163.com/api/search/get', {
+    method: 'POST',
+    headers: NETEASE_HEADERS,
+    form: { s: keyword, type: '1', offset: '0', limit: '5' },
+    timeout: 6000
+  })
+  const list = asArr(asObj(asObj(asObj(searchRes.body).result).songs))
+  const picked = pickBestSongItem(list, song.name, song.singer)
+  const id = str(picked?.id)
+  if (!id) return null
+
+  const lyricRes = await httpRequest(
+    `https://music.163.com/api/song/lyric?id=${encodeURIComponent(id)}&lv=-1&kv=-1&tv=-1`,
+    { method: 'GET', headers: NETEASE_HEADERS, timeout: 6000 }
+  )
+  const trans = str(asObj(asObj(lyricRes.body).tlyric).lyric)
+  if (!trans.trim()) return null
+  return { id: 'netease', label: '官方翻译 · 网易云', platform: '网易云', tlyric: trans }
+}
+
+/**
+ * 收集所有能拿到的官方翻译。
+ *
+ * 并发拉取、各自独立失败 —— 一个平台挂了不该影响另一个。
+ * 顺序固定（QQ 在前），因为实测 QQ 的翻译质量与覆盖率都更好。
+ */
+export async function fetchOfficialTranslations(song: Song): Promise<OfficialTranslation[]> {
+  const settled = await Promise.allSettled([translationFromQQ(song), translationFromNetease(song)])
+  const out: OfficialTranslation[] = []
+  for (const r of settled) {
+    if (r.status === 'fulfilled' && r.value) out.push(r.value)
+  }
+  return out
+}
