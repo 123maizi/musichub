@@ -97,6 +97,18 @@ export const usePlayerStore = defineStore('player', () => {
    * 拖动进度条后紧接着收到的 ended 不可信（详见 seek 与 ended 处的说明）。
    */
   let lastSeekAt = 0
+  /**
+   * seek 之后的「允许回退」窗口。
+   *
+   * 单调守卫（同一首歌内位置只增不减）本身是对的 —— 它防止换流时元素先报 0
+   * 造成「进度条突然归零」。但它必须是**可解锁**的：一旦某次把 currentTime 顶高了
+   * （典型来源见 applyPosition），后面所有更小的真实位置都会被永久挡掉，
+   * 进度条从此卡死，而且**两个进度条会一起废掉** ——
+   * 这正是用户报的「拖完这个，另一个就不跟了」。
+   */
+  let seekGraceUntil = 0
+  /** 窗口长度：够元素把 seek 落位后的真实位置报上来 */
+  const SEEK_GRACE = 1500
 
   /**
    * 拖动进度条后多久内不认 ended。
@@ -188,9 +200,21 @@ export const usePlayerStore = defineStore('player', () => {
    */
   function reportTime(value: number, force = false): void {
     if (!Number.isFinite(value) || value < 0) return
-    if (!force && value + TIME_BACK_TOLERANCE < currentTime.value) return
+    /**
+     * 单调守卫 + 可解锁的宽限期。
+     *
+     * 守卫本身必须留着：换流时音频元素会先把 currentTime 报成 0，
+     * 那道回退正是用户看到的「进度条突然归零」。
+     *
+     * 但守卫**不能是永久闩锁**：一旦状态被顶到高位（比如 seek 时读到旧值），
+     * 此后所有更小的真实位置都会被无条件挡掉，进度条就再也不动了 ——
+     * 而且因为两个进度条读的是同一个 currentTime，它们会一起卡住。
+     * 所以 seek 之后的短窗口内放行回退，让元素上报的真实位置把状态校正回来。
+     */
+    const grace = Date.now() < seekGraceUntil
+    if (!force && !grace && value + TIME_BACK_TOLERANCE < currentTime.value) return
     currentTime.value = value
-    bumpProgress(force)
+    bumpProgress(force || grace)
   }
 
   const currentLyricIndex = computed(() => findLyricIndex(lyricLines.value, currentTime.value))
@@ -390,19 +414,24 @@ export const usePlayerStore = defineStore('player', () => {
     const target = end === null ? Math.max(0, at) : Math.max(0, Math.min(at, end))
     // 拖过进度条 / 换源落位后紧接着的 ended 不可信（见 ended 处说明）
     lastSeekAt = Date.now()
+    // 开始一段允许回退的窗口，给元素的真实位置一个校正机会（见 reportTime）
+    seekGraceUntil = Date.now() + SEEK_GRACE
     try {
       el.currentTime = target
     } catch {
       /* 元数据还没就绪时赋值可能抛错，忽略即可 */
     }
-    const applied = Number.isFinite(el.currentTime) ? el.currentTime : 0
     /**
-     * 只有「真的落到位了」才允许改写进度。
-     * 若目标位置明显大于 0、元素却仍报 0，说明这次跳转没生效
-     * （元数据没就绪 / 元素状态不允许），此时保持原进度不动 ——
-     * 强行按元素当前值刷新，就是又一次「进度条被打回起点」。
+     * 按**目标位置**更新进度，**不要**用 el.currentTime 的读回值。
+     *
+     * 赋值是异步的：元数据没就绪时读回来还是旧值。旧代码把读回值写进状态，
+     * 造成两个用户可见的毛病：
+     *   1. 「拖了没反应，不跳到对应时间」—— 界面停在旧位置；
+     *   2. 「拖完这个、另一个进度条就不跟了」—— 读回的大值把 currentTime 顶高，
+     *      随后元素上报的真实新位置（更小）被单调守卫永久挡掉，进度整个卡死。
+     * 目标位置就是用户拖到的地方，先按它显示；紧接着的 timeupdate 会校正到真实值。
      */
-    if (applied > 0.05 || target <= 0.05) reportTime(applied, true)
+    reportTime(target, true)
   }
 
   /* ------------------------------ 音频实例 ------------------------------ */
