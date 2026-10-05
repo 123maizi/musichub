@@ -580,6 +580,56 @@ export const usePlayerStore = defineStore('player', () => {
 
   /* ------------------------------ 播放控制 ------------------------------ */
 
+  /* ------------------------------ 加载并播放 ------------------------------ */
+
+  /**
+   * 加载超时：超过这个时间既不成功也不报错，就认定这条流不可用。
+   * 取 12 秒是折中 —— 正常的「放不了」都是秒级报错，只有「挂住」才会走到这里；
+   * 而最多自动换 3 次，所以最坏等待时间约 36 秒，不会无限转圈。
+   */
+  const PLAY_LOAD_TIMEOUT = 12000
+  /** 媒体无法播放时最多自动换几次源 */
+  const MAX_PLAY_RETRY = 3
+
+  /**
+   * 加载并开始播放，带**超时**与**媒体错误**捕获。
+   *
+   * 为什么必须有超时：`el.play()` 返回的 Promise 在「既不成功也不报错」时会一直挂着
+   * （代理挂住、上游迟迟不返回、响应不是媒体却没触发 error）。那时调用方的 finally
+   * 永不执行，loading 永远是 true —— 用户看到的就是「选中歌曲后一直加载、不出声」。
+   *
+   * 为什么要把 error 事件也拉进来竞争：Chromium 对
+   * 「Failed to load because no supported source was found」有时**只发 error 事件、
+   * 不 reject play()**，只 await play() 会完全漏掉它。
+   */
+  async function loadAndPlay(
+    el: HTMLAudioElement,
+    url: string,
+    token: number,
+    timeoutMs = PLAY_LOAD_TIMEOUT
+  ): Promise<'ok' | 'media-error' | 'timeout' | 'stale'> {
+    let onError: (() => void) | null = null
+    const errorHit = new Promise<'media-error'>((resolve) => {
+      onError = () => resolve('media-error')
+      el.addEventListener('error', onError)
+    })
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs)
+    })
+
+    el.src = url
+    const playSettled = el.play().then(
+      () => 'ok' as const,
+      () => 'media-error' as const
+    )
+
+    const outcome = await Promise.race([playSettled, errorHit, timedOut])
+    if (timer) clearTimeout(timer)
+    if (onError) el.removeEventListener('error', onError)
+    return token !== playToken ? 'stale' : outcome
+  }
+
   /** 播放指定歌曲；传入 list 时会替换整个播放队列 */
   async function play(song: Song, list?: Song[]): Promise<void> {
     if (list && list.length > 0) {
@@ -671,8 +721,50 @@ export const usePlayerStore = defineStore('player', () => {
       attempts.value = result.attempts ?? []
 
       const el = ensureAudio()
-      el.src = result.url
-      await el.play()
+      /**
+       * 加载 + 播放，失败**自动换源重试**。
+       *
+       * Chromium 抛出「Failed to load because no supported source was found」
+       * 基本都意味着这条流不可用（响应不是媒体 / 上游拒绝 / 格式不对），
+       * 而不是「这首歌听不了」—— 换一个音源往往就能救回来。
+       * 所以这里不再只弹一句「音源地址已失效」让用户自己去切音源，
+       * 而是复用既有的坏源冷却机制：上报 → 重新取流（会换别的源）→ 重试。
+       * 这才是「有些歌曲无法播放」的根治办法。
+       */
+      let outcome = await loadAndPlay(el, result.url, token)
+      let tries = 0
+      while (outcome !== 'ok' && outcome !== 'stale' && tries < MAX_PLAY_RETRY && token === playToken) {
+        tries += 1
+        const sid = urlInfo.value?.sourceId
+        if (sid) {
+          markedSources.add(sid)
+          await reportBadSource(
+            sid,
+            song,
+            outcome === 'timeout' ? '加载超时（迟迟不给数据）' : '媒体无法加载或解码'
+          ).catch(() => undefined)
+        }
+        if (token !== playToken) return
+        // 给用户一个「正在自救」的反馈，而不是傻等
+        error.value = `这个音源放不了，正在换一个重试（${tries}/${MAX_PLAY_RETRY}）…`
+
+        const retry = await getPlayUrl({ song, quality: quality.value })
+        if (token !== playToken) return
+        urlInfo.value = retry
+        attempts.value = retry.attempts ?? []
+        outcome = await loadAndPlay(el, retry.url, token)
+      }
+
+      if (outcome === 'stale') return
+      if (outcome !== 'ok') {
+        error.value =
+          outcome === 'timeout'
+            ? `播放失败：已试过 ${MAX_PLAY_RETRY} 个音源都迟迟没有数据，换首歌或稍后再试`
+            : `播放失败：已试过 ${MAX_PLAY_RETRY} 个音源都无法播放这首歌`
+        playing.value = false
+        return
+      }
+      error.value = null
       // 迟到的 play() 不该改状态：那一代已经不是当前播放了
       if (token !== playToken) return
       playing.value = true

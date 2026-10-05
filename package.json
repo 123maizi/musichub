@@ -1,6 +1,6 @@
 {
   "name": "musichub",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "MusicHub - 多音源音乐聚合播放与下载器",
   "main": "./out/main/index.js",
   "author": "MusicHub",
