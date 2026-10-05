@@ -4,7 +4,7 @@
  * 图标全部走 AppIcon（内联 SVG），不再使用 ⏮ ▶ ⏭ 这类符号。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { PLATFORM_META, QUALITY_META } from '@shared/constants'
+import { PLATFORM_META, QUALITY_META, QUALITY_ORDER } from '@shared/constants'
 import AppIcon from './AppIcon.vue'
 import PlaylistMenu from './PlaylistMenu.vue'
 import { useDownloadStore } from '../stores/downloads'
@@ -78,6 +78,31 @@ const platformName = computed(() =>
 const qualityLabel = computed(() => {
   const q = player.urlInfo?.quality ?? player.quality
   return QUALITY_META[q]?.short ?? String(q)
+})
+
+/* ------------------------------ 音质快捷选择 ------------------------------ */
+
+/**
+ * 期望音质（菜单里勾的那个）与实际拿到的音质可能不同：
+ * 期望无损但这首歌只有 320k 时，标签要显示真实的 320K —— 否则用户
+ * 会以为自己正在听无损。菜单勾选的始终是「期望值」。
+ */
+const qualityMenuOpen = ref(false)
+
+function chooseQuality(q: (typeof QUALITY_ORDER)[number]): void {
+  qualityMenuOpen.value = false
+  if (player.quality === q) return
+  // 立即按新音质重新取流（换流保位置，不会从头播）
+  void player.setQuality(q)
+}
+
+/** 点页面其它地方关闭菜单；用 once 监听，不必维护持久句柄 */
+watch(qualityMenuOpen, (open) => {
+  if (!open) return
+  const close = (): void => {
+    qualityMenuOpen.value = false
+  }
+  document.addEventListener('click', close, { once: true })
 })
 
 const isCurrentFavorite = computed(() =>
@@ -397,9 +422,35 @@ function openPlaylistMenu(event: MouseEvent): void {
 
       <!-- 右：音质 / 模式 / 收藏 / 下载 / 音量 -->
       <div class="tools">
-        <span v-if="player.urlInfo" class="tag accent" :title="`由音源「${player.urlInfo.sourceName}」提供`">
-          {{ qualityLabel }}
-        </span>
+        <!--
+          音质快捷选择：点一下直接换，不必进设置页。
+          显示的是**当前实际生效**的音质（urlInfo.quality，即真正拿到的那个），
+          菜单里勾选的是**期望音质**（player.quality）—— 两者可能不同：
+          期望无损但只有 320k 时，标签显示 320K 才对，否则用户会以为拿到了无损。
+        -->
+        <div v-if="player.urlInfo" class="quality-pick">
+          <button
+            class="tag accent quality-btn"
+            :title="`当前 ${qualityLabel}（由音源「${player.urlInfo.sourceName}」提供）；点一下切换期望音质`"
+            @click.stop="qualityMenuOpen = !qualityMenuOpen"
+          >
+            {{ qualityLabel }}<span class="caret">▾</span>
+          </button>
+          <Transition name="rise">
+            <div v-if="qualityMenuOpen" class="quality-menu" @click.stop>
+              <button
+                v-for="q in QUALITY_ORDER"
+                :key="q"
+                class="quality-item"
+                :class="{ on: player.quality === q }"
+                @click="chooseQuality(q)"
+              >
+                <span>{{ QUALITY_META[q]?.name }}</span>
+                <span class="faint mono">{{ QUALITY_META[q]?.short }}</span>
+              </button>
+            </div>
+          </Transition>
+        </div>
         <span v-if="player.urlInfo" class="src-name ellipsis" :title="player.urlInfo.sourceName">
           {{ player.urlInfo.sourceName }}
         </span>
@@ -775,6 +826,80 @@ function openPlaylistMenu(event: MouseEvent): void {
   max-width: 110px;
   font-size: var(--fs-xs);
   color: var(--ink-subtle);
+}
+
+/* ------------------------------ 音质快捷选择 ------------------------------ */
+
+/*
+ * 菜单向上弹：播放条贴着窗口底部，向下弹会被裁掉。
+ * 与全站一致的克制样式 —— 零圆角、零阴影，层次只用 1px 刻线。
+ */
+.quality-pick {
+  position: relative;
+}
+
+.quality-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  font: inherit;
+  letter-spacing: var(--ls-wide);
+}
+
+.quality-btn:hover {
+  border-color: var(--accent);
+}
+
+.caret {
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.quality-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px 0;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+}
+
+.quality-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: 6px 12px;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.quality-item:hover {
+  background: var(--surface-hover);
+}
+
+.quality-item.on {
+  color: var(--accent);
+}
+
+.quality-item.on::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 2px;
+  height: 16px;
+  background: var(--accent);
 }
 
 /* 音量：可见轨道仍是 3px，命中区 24px */

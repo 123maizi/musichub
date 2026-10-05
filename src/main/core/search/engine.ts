@@ -16,6 +16,7 @@ import type {
 } from '@shared/types/music'
 import { APP_CONST, qualityRank } from '@shared/constants'
 import { keywordWantsVariant, titlePurityScore } from '@shared/purity'
+import { albumPenalty, artistMatchScore, keywordTokens, normalizeName } from '@shared/originality'
 import type { SourceManager } from '../source/manager'
 import { builtinProviders, type ProviderSearchResult, type SearchProvider } from './builtin'
 // 艺人搜索是独立模块（接口结构完全不同），单独引入，刻意不动已经稳定的 builtin
@@ -705,38 +706,63 @@ export class SearchEngine {
    * 分数只用于排序，不影响展示字段。
    */
   private scoreSong(song: Song, keyword: string, wantsVariant: boolean): number {
-    const kw = keyword.trim().toLowerCase()
-    const name = song.name.toLowerCase()
-    const singer = song.singer.toLowerCase()
+    const tokens = keywordTokens(keyword)
+    const kw = normalizeName(keyword)
+    const name = normalizeName(song.name)
     let score = 0
 
-    // 1) 歌名与关键词的吻合度 —— 最强信号
-    if (name === kw) score += 120
-    else if (name.startsWith(kw)) score += 70
-    else if (name.includes(kw)) score += 30
+    /**
+     * 1) **歌手字段 —— 权重最高的信号**
+     *
+     * 为什么歌手比歌名可靠：DJ 版同样可以把歌名写成《晴天》，
+     * 但歌手字段很难伪装成「周杰伦」。
+     *
+     * 原来的实现拿**整个关键词**去 `singer.includes(kw)`，用户搜「周杰伦 晴天」时
+     * 歌名和歌手字段都不含这一整串，两边全部匹配不上 —— 等于这个最强信号根本没用上。
+     * 这里改成先拆片段、再逐片段比对，并对繁简 / 括号 / 别名做归一。
+     */
+    let artistBest = 0
+    for (const token of tokens) {
+      const hit = artistMatchScore(song.singer, token)
+      if (hit > artistBest) artistBest = hit
+    }
+    score += artistBest
+
+    // 2) 歌名吻合度：任一关键词片段命中即可（多词搜索时不再要求整串命中）
+    let titleBest = 0
+    for (const token of tokens) {
+      if (name === token) titleBest = Math.max(titleBest, 120)
+      else if (name.startsWith(token)) titleBest = Math.max(titleBest, 70)
+      else if (name.includes(token)) titleBest = Math.max(titleBest, 30)
+    }
+    if (tokens.length === 0 && kw) {
+      if (name === kw) titleBest = 120
+      else if (name.startsWith(kw)) titleBest = 70
+      else if (name.includes(kw)) titleBest = 30
+    }
+    score += titleBest
 
     /**
-     * 2) 标题纯净度（见 @shared/purity）：
-     *    干净的名字加分，带 DJ / 伴奏 / 变速 / 烟嗓这类改版后缀的扣分。
-     *    用户专门搜改版时不生效 —— 那种时候他要找的正是这些。
+     * 3) 标题纯净度（见 @shared/purity）：**辅助项**。
+     *    干净的名字加分，带 DJ / 伴奏 / 变速 / 烟嗓这类后缀的扣分。
+     *    它只能做辅助 —— 有些原唱的歌名本身就带后缀（《晴天 (Live)》是官方发行的 Live），
+     *    所以不能让它单独决定排序。用户专门搜改版时整套惩罚不生效。
      */
     if (!wantsVariant) score += titlePurityScore(song.name)
 
-    // 3) 歌手名命中（用户直接搜「周杰伦」时，这条最管用）
-    if (singer.includes(kw)) score += 60
+    // 4) 专辑字段交叉验证：有专辑说明是正规发行；落在合集/精选/抖音这类则减分
+    if (song.albumName) score += 8
+    if (!wantsVariant) score += albumPenalty(song.albumName)
 
-    // 4) 热度：部分平台会带播放量，有就利用（权重压得低，避免平台间不公平）
+    // 5) 热度兜底：部分平台会带播放量，有就用（权重压得低，避免平台间不公平）
     const raw = (song.raw ?? {}) as Record<string, unknown>
     const heat = Number(raw.PLAYCNT ?? raw.playCount ?? raw.playcnt ?? 0)
     if (Number.isFinite(heat) && heat > 0) {
       score += Math.min(Math.log10(heat) * 5, 30)
     }
 
-    // 5) 时长过短多半是铃声 / 片段
+    // 6) 时长过短多半是铃声 / 片段
     if (song.duration > 0 && song.duration < 60) score -= 40
-
-    // 6) 有专辑信息说明是正规发行版本，轻微加分
-    if (song.albumName) score += 8
 
     return score
   }

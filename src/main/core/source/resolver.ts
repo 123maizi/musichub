@@ -33,7 +33,26 @@ import type { StreamProxy } from '../proxy/stream-proxy'
  * 4 是「快速出结果」与「别把公益音源打爆」之间的折中：
  * 实测同一平台首批失败源串行试完要 50 秒以上，并发后降到个位数秒。
  */
-const RACE_WIDTH = 4
+/**
+ * 一轮竞速的并发源数量。
+ *
+ * 原先是 4。音源从 27 涨到 46 之后，4 个一组串行推进意味着「第一组全挂」
+ * 时要等 4 轮才轮到第 16 个源 —— 用户感受到的就是解析慢。
+ * 提到 8 之后首轮就覆盖了历史成功率最高的 8 个源，绝大多数歌曲在这一轮内出结果。
+ *
+ * 不宜再往上加：每多一个源就多一次上游请求与一次沙箱往返，
+ * 而且真正的瓶颈往往是「上游慢」而不是「并发不够」。
+ */
+const RACE_WIDTH = 8
+
+/**
+ * 音质层的错峰启动间隔（毫秒）。
+ *
+ * 第 i 层在第 i × 这个值 时启动。取值依据：正常的取流往返在几百毫秒内，
+ * 700ms 还没结果基本意味着这一层拿不到。太小会让低音质层过早抢跑（牺牲音质），
+ * 太大又退化成原来的串行等待。
+ */
+const TIER_HEDGE_MS = 700
 
 /** 音源返回的地址可能带自定义请求头 */
 interface NormalizedUrl {
@@ -170,18 +189,25 @@ export class MusicResolver {
 
     const ladder = this.qualityLadder(song, req.quality)
 
-    // 按音质从高到低逐层尝试
-    for (const quality of ladder) {
-      const group = candidates.filter((src) => this.supportsQuality(src, song.platform, quality))
-      if (group.length === 0) continue
-
-      const hit = await this.attemptGroup(group, song, quality, attempts)
-      if (hit) {
-        const result = this.buildResult(hit, song, quality, attempts)
-        // 显式指定音源的调用不写缓存，免得把它当成「这首歌的默认地址」缓存住
-        if (!explicitSources) this.writeCache(song, req.quality, result)
-        return result
-      }
+    /**
+     * 逐层尝试 + **分层对冲**，目标是「快到无感」。
+     *
+     * 原来的实现是最朴素的串行：无损层把所有候选源跑完（可能要几秒）才轮到 320k。
+     * 音源从 27 个涨到 46 个之后，这个串行代价被放大得很明显 —— 用户感受到的就是「解析慢」。
+     *
+     * 现在给每一层配一个**错峰启动时钟**：第 i 层在 i × TIER_HEDGE_MS 时启动。
+     * 高层只要按时出结果，就一定是它胜出（音质优先不变）；只有高层明显卡住
+     * （多半是真拿不到）时，低层才有机会先返回，从而把等待时间压到一层的量级。
+     *
+     * 谁先成功用谁，不做「等更高层再看一眼」的犹豫 —— 那会把每首歌都拖慢一点点，
+     * 而用户要的是无感。
+     */
+    const chosen = await this.attemptLadder(candidates, ladder, song, attempts)
+    if (chosen) {
+      const result = this.buildResult(chosen.hit, song, chosen.quality, attempts)
+      // 显式指定音源的调用不写缓存，免得把它当成「这首歌的默认地址」缓存住
+      if (!explicitSources) this.writeCache(song, req.quality, result)
+      return result
     }
 
     // 所有音质层都失败，用错误汇总给出可读原因
@@ -310,6 +336,71 @@ export class MusicResolver {
   }
 
   /* ------------------------------ 尝试与竞速 ------------------------------ */
+
+  /**
+   * 分层对冲地跑完整条音质阶梯，返回第一个成功的结果。
+   *
+   * 第 i 层在 `i * TIER_HEDGE_MS` 时启动：高层按时返回就它赢（音质优先），
+   * 高层卡住则低层提前补位。全部层都失败才返回 null。
+   */
+  private attemptLadder(
+    candidates: LoadedSource[],
+    ladder: Quality[],
+    song: Song,
+    attempts: SourceAttempt[]
+  ): Promise<{ hit: { src: LoadedSource; url: NormalizedUrl }; quality: Quality } | null> {
+    if (ladder.length === 0) return Promise.resolve(null)
+
+    return new Promise((resolve) => {
+      let done = false
+      let settled = 0
+      let launched = 0
+
+      const finish = (
+        value: { hit: { src: LoadedSource; url: NormalizedUrl }; quality: Quality } | null
+      ): void => {
+        if (done) return
+        done = true
+        resolve(value)
+      }
+
+      /** 所有已启动的层都失败、且没有更多层可启动时收尾 */
+      const maybeGiveUp = (): void => {
+        if (done) return
+        if (settled >= launched && launched >= ladder.length) finish(null)
+      }
+
+      const launch = (tier: number): void => {
+        if (done) return
+        launched = tier + 1
+        const quality = ladder[tier]
+        const group = candidates.filter((src) => this.supportsQuality(src, song.platform, quality))
+
+        if (group.length === 0) {
+          settled += 1
+          maybeGiveUp()
+          return
+        }
+
+        void this.attemptGroup(group, song, quality, attempts).then(
+          (hit) => {
+            settled += 1
+            if (hit) finish({ hit, quality })
+            else maybeGiveUp()
+          },
+          () => {
+            settled += 1
+            maybeGiveUp()
+          }
+        )
+      }
+
+      for (let tier = 0; tier < ladder.length; tier += 1) {
+        if (tier === 0) launch(0)
+        else setTimeout(() => launch(tier), tier * TIER_HEDGE_MS)
+      }
+    })
+  }
 
   /**
    * 对一组音源尝试取流：先并发竞速前 N 个，失败则顺延剩余。
