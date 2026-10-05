@@ -188,6 +188,15 @@ export const usePlayerStore = defineStore('player', () => {
    */
   let awaitingStream = false
 
+  /**
+   * 「正在自动换源自救」的标记。
+   *
+   * 换源是软件自己的动作，期间音频元素必然会报错 —— 但那不是用户需要知道的事，
+   * 因为下一秒就可能换源成功。这个标记用来**压住所有中间提示**，
+   * 让换源全程静默；彻底失败时再由换源流程统一给出一次明确错误。
+   */
+  let autoRecovering = false
+
   /** 允许的进度回退容差（秒）：抹掉流重载、时长微调造成的亚秒级抖动 */
   const TIME_BACK_TOLERANCE = 0.75
 
@@ -572,6 +581,18 @@ export const usePlayerStore = defineStore('player', () => {
         loading.value = false
         return
       }
+      /**
+       * 自动换源 / 换源重取期间**不弹任何提示**。
+       *
+       * 这时的失败是软件自己的自查动作造成的，下一秒就可能换源成功；
+       * 先闪一条红字再消失，只会让人觉得「这软件老出问题」。
+       * 真正需要用户知道的失败，由换源流程在**彻底放弃时**统一给出。
+       */
+      if (autoRecovering || switching) {
+        playing.value = false
+        loading.value = false
+        return
+      }
       // 本地文件的失败原因和网络音源完全不同，提示得分开写，
       // 否则用户会看到「音源地址失效」去折腾音源，而其实是文件被删了
       error.value =
@@ -739,6 +760,18 @@ export const usePlayerStore = defineStore('player', () => {
        * 而是复用既有的坏源冷却机制：上报 → 重新取流（会换别的源）→ 重试。
        * 这才是「有些歌曲无法播放」的根治办法。
        */
+      /**
+       * 换源**全程静默**。
+       *
+       * 自动换源是软件自己的自救动作，用户没有做错任何事，也没必要知道
+       * 第几次重试 —— 冒一条红字「正在换源」只会让听歌的人心里一紧。
+       * 只有**所有源都试完仍然失败**才值得打扰用户（下面那两处）。
+       *
+       * 静默靠 autoRecovering 这个标记实现：它同时压住音频元素的 error 监听
+       * （否则元素报错会先闪一条「音源地址已失效」，而下一秒就换源成功了）。
+       */
+      // 从**第一次加载**起就算「自救中」：否则首次失败时元素错误监听会抢先弹一条红标
+      autoRecovering = true
       let outcome = await loadAndPlay(el, result.url, token)
       let tries = 0
       while (outcome !== 'ok' && outcome !== 'stale' && tries < MAX_PLAY_RETRY && token === playToken) {
@@ -753,8 +786,6 @@ export const usePlayerStore = defineStore('player', () => {
           ).catch(() => undefined)
         }
         if (token !== playToken) return
-        // 给用户一个「正在自救」的反馈，而不是傻等
-        error.value = `这个音源放不了，正在换一个重试（${tries}/${MAX_PLAY_RETRY}）…`
 
         const retry = await getPlayUrl({ song, quality: quality.value })
         if (token !== playToken) return
@@ -762,6 +793,7 @@ export const usePlayerStore = defineStore('player', () => {
         attempts.value = retry.attempts ?? []
         outcome = await loadAndPlay(el, retry.url, token)
       }
+      autoRecovering = false
 
       if (outcome === 'stale') return
       if (outcome !== 'ok') {
