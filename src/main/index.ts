@@ -10,7 +10,7 @@
  */
 import { app, BrowserWindow } from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { APP_CONST, DEFAULT_NAME_TEMPLATE } from '@shared/constants'
@@ -108,10 +108,20 @@ function createLogger(logFile: string): AppLogger {
 }
 
 /**
- * 首次运行：把随应用分发的内置音源导入到用户目录。
+ * 把随应用分发的内置音源补齐到用户目录。
  *
- * 只有确实导入了东西才写标记 —— 否则「路径写错导致导入 0 个」会被标记成已完成，
- * 之后永远不再重试（这个坑已经踩过一次）。
+ * **每个版本都检查一次，而不是「首次运行导一次就永久跳过」。**
+ *
+ * 这里踩过一个真实的坑：原来只用「标记文件存在就 return」判断，于是
+ * 随新版本分发的新音源**永远到不了老用户手里** —— 1.4.3 给内置音源加了 19 个，
+ * 用户装完打开一看还是 27 个，以为没加。
+ *
+ * 之所以可以放心地重复调用：`importBundled()` 是**按内容哈希去重**的，
+ * 已存在的脚本会被跳过，所以重复执行只会补上新增的，不会产生副本、
+ * 也不会覆盖用户自己改过的文件。
+ *
+ * 标记文件里存的是**版本号**（老版本存的是日志文本，会被判定为「不等于当前版本」，
+ * 因此升级到本版后会自动补一次 —— 这正是我们想要的）。
  */
 async function importBundledIfNeeded(
   sources: SourceManager,
@@ -119,25 +129,28 @@ async function importBundledIfNeeded(
   log: (level: LogLevel, scope: string, message: string) => void
 ): Promise<void> {
   try {
-    if (existsSync(markerFile)) return
+    let lastVersion = ''
+    try {
+      if (existsSync(markerFile)) lastVersion = readFileSync(markerFile, 'utf8').trim()
+    } catch {
+      /* 标记读不出来就当成没导过，重导一次（哈希去重保证安全） */
+    }
+    if (lastVersion === app.getVersion()) return
 
     const result = await sources.importBundled()
 
     if (result.imported.length === 0 && result.failed.length === 0) {
+      // 一个内置音源都没找到（例如路径不对）：不写标记，下次启动再试
       log('warn', 'app', '未发现内置音源（请确认 resources/sources 存在），本次跳过导入')
       return
     }
 
     mkdirSync(join(markerFile, '..'), { recursive: true })
-    appendFileSync(
-      markerFile,
-      `bundled imported at ${new Date().toISOString()} (${result.imported.length} ok, ${result.failed.length} failed)\n`,
-      'utf8'
-    )
+    writeFileSync(markerFile, app.getVersion(), 'utf8')
     log(
       'info',
       'app',
-      `内置音源导入完成: 成功 ${result.imported.length}，失败 ${result.failed.length}`
+      `内置音源补齐: 新增 ${result.imported.length}，已存在跳过 ${result.skipped.length}，失败 ${result.failed.length}`
     )
   } catch (err) {
     log('warn', 'app', `内置音源导入异常: ${err instanceof Error ? err.message : String(err)}`)
