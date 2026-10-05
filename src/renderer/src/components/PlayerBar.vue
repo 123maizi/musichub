@@ -210,6 +210,28 @@ function onSeekCommit(event: Event): void {
 }
 
 /**
+ * 「拖动中」的看门狗。
+ *
+ * 若拖动的收尾事件没到（拖到窗口外松手、或浏览器没派发 change），
+ * `seeking` 会永远停在 true —— 此时显示进度被 seekValue 接管，
+ * 表现为「条子卡住不动、好像划不动」。这里兜一道：拖动状态最多维持 2 秒，
+ * 到点自动交还给真实进度。正常的拖动几百毫秒就提交了，不会误触发。
+ */
+let seekingWatchdog: ReturnType<typeof setTimeout> | null = null
+watch(seeking, (on) => {
+  if (seekingWatchdog) {
+    clearTimeout(seekingWatchdog)
+    seekingWatchdog = null
+  }
+  if (!on) return
+  seekingWatchdog = setTimeout(() => {
+    seeking.value = false
+    seekingWatchdog = null
+    syncSeekInput()
+  }, 2000)
+})
+
+/**
  * 旧的「低频基准 + 字符串绑定」方案已删除 ——
  * 它仍然每秒写一次 value（1 次布局/秒），换成「不绑 value + 在 focus/keydown/换歌时同步」
  * 之后，播放期间对 range 的写入为 0。

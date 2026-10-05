@@ -458,15 +458,23 @@ export const usePlayerStore = defineStore('player', () => {
 
     el.addEventListener('timeupdate', () => {
       /**
-       * 换歌取流期间，元素上报的还是**上一首**的秒数 —— 一律不采信。
+       * 时长同步**必须放在守卫之前** —— 这是我修上一个 bug 时亲手引入的回归。
+       *
+       * 换歌窗口期里原本把整段 return 掉，连 `syncDuration()` 也一起跳过了。
+       * 而 syncDuration 正是把「媒体真实时长」写进 mediaDuration 的地方：一旦被跳过，
+       * duration 可能一直是 0，于是进度条的 `:disabled="duration <= 0"` 成立 ——
+       * **条子变得不可拖动、进度永远停在 0，而歌还在正常播放**。
+       * 用户报的「缩略图进度条划不动、进度不变」正是这个。
+       */
+      syncDuration()
+      /**
+       * 换歌取流期间，元素上报的还是**上一首**的秒数 —— 这部分才是不该采信的。
        * 这里没有用 playToken 比较，是因为 Audio 元素是复用的单例、
        * 监听器只注册一次，捕获到的 token 早已过期，比了也没意义；
        * 用一个显式的窗口期标记反而更准（它精确覆盖「已清零、新流未接上」这段）。
        */
       if (awaitingStream) return
       reportTime(el.currentTime)
-      // 顺带兜底：有些音源要播一会儿才报出真实时长
-      syncDuration()
     })
     el.addEventListener('loadedmetadata', () => {
       // 新流的元数据到了，窗口期结束，此后上报的时间属于新歌
@@ -767,6 +775,14 @@ export const usePlayerStore = defineStore('player', () => {
       error.value = null
       // 迟到的 play() 不该改状态：那一代已经不是当前播放了
       if (token !== playToken) return
+      /*
+       * 播放成功这一刻**必然**能拿到真实时长，所以在这里确定性地同步一次。
+       *
+       * 不依赖 timeupdate / durationchange 的时序：那些事件有可能被跳过
+       * （例如换歌窗口期、或浏览器迟迟不发 durationchange），一旦漏掉，
+       * duration 会停在 0 —— 进度条的 :disabled 条件成立，条子就「划不动」了。
+       */
+      if (Number.isFinite(el.duration) && el.duration > 0) mediaDuration.value = el.duration
       playing.value = true
 
       // 歌词是锦上添花，失败了不打扰用户
