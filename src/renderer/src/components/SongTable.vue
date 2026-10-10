@@ -4,8 +4,10 @@ import type { Song } from '@shared/types/music'
 import { PLATFORM_META, QUALITY_META, findFormat, qualityRank } from '@shared/constants'
 import { useRouter } from 'vue-router'
 import { formatTime } from '../utils/format'
+import { copyText, songCopyText } from '../utils/clipboard'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
+import { usePlayerStore } from '../stores/player'
 import AppIcon from './AppIcon.vue'
 import PlaylistMenu from './PlaylistMenu.vue'
 
@@ -187,6 +189,8 @@ function rowDeps(song: Song, index: number): unknown[] {
 // 收藏状态直接读音乐库，省得往每一层传 props
 const library = useLibraryStore()
 const downloads = useDownloadStore()
+/** 悬停时提前解析取流地址：点下去几乎立刻出声 */
+const player = usePlayerStore()
 
 /** 下载按钮的提示写着「下载为 MP3 320Kbps」—— 点之前就知道会拿到什么 */
 const downloadFormatLabel = computed(() => {
@@ -214,6 +218,32 @@ function openAlbum(song: Song): void {
 function isFavorite(song: Song): boolean {
   return library.isFavorite(song.id)
 }
+
+/* ------------------------------ 复制歌名 ------------------------------ */
+
+/**
+ * 刚复制过的那一行。
+ *
+ * 复制是「没有视觉结果」的操作 —— 不做反馈，用户根本不知道有没有成功，
+ * 会反复点。这里把按钮短暂变成「已复制」，是最轻的确认方式（不弹 toast 打断）。
+ */
+const copiedId = ref('')
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+
+async function copySongName(song: Song): Promise<void> {
+  const ok = await copyText(songCopyText(song))
+  if (!ok) return
+  copiedId.value = song.id
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copiedId.value = ''
+    copiedTimer = null
+  }, 1400)
+}
+
+onBeforeUnmount(() => {
+  if (copiedTimer) clearTimeout(copiedTimer)
+})
 
 async function toggleFavorite(song: Song): Promise<void> {
   await library.toggleFavorite(song)
@@ -258,6 +288,7 @@ function isLossless(song: Song): boolean {
         :key="song.id"
         v-memo="rowDeps(song, index)"
         class="row"
+        @mouseenter.passive="player.prefetchSong(song)"
         :class="{
           'no-platform': !showPlatform,
           playing: song.id === currentId,
@@ -315,6 +346,14 @@ function isLossless(song: Song): boolean {
         <span class="col-actions">
           <button class="ghost tiny" title="播放" @click.stop="emit('play', song)">
             <AppIcon name="play" :size="13" />
+          </button>
+          <button
+            class="ghost tiny"
+            :class="{ liked: copiedId === song.id }"
+            :title="copiedId === song.id ? '已复制' : '复制歌名（歌手 - 歌名）'"
+            @click.stop="copySongName(song)"
+          >
+            <AppIcon :name="copiedId === song.id ? 'check' : 'copy'" :size="13" />
           </button>
           <button
             class="ghost tiny"

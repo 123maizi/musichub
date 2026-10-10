@@ -54,6 +54,22 @@ const RACE_WIDTH = 8
  */
 const TIER_HEDGE_MS = 700
 
+/**
+ * 候选音源少于这个数量时，把冷却中的也放回来参与。
+ *
+ * 冷却机制是为了不反复踩同一个坑，但当某个平台的可用音源被冷却到只剩一两个时，
+ * 「不再踩坑」的收益远小于「歌放不出来」的代价 —— 这时宁可不冷却。
+ */
+const MIN_CANDIDATES = 3
+
+/**
+ * 音源还在装载时的最长等待（毫秒）。
+ *
+ * 启动后十几秒内多数音源尚未完成 inited 握手，此时挑不出候选是**正常的中间状态**，
+ * 不是「这首歌没有音源」。等一会儿再判定，比立刻报错诚实得多。
+ */
+const SOURCE_WAIT_MS = 5000
+
 /** 音源返回的地址可能带自定义请求头 */
 interface NormalizedUrl {
   url: string
@@ -83,6 +99,17 @@ export class MusicResolver {
 
   /** 缓存有效期 */
   private static readonly CACHE_TTL = 4 * 60 * 1000
+
+  /**
+   * 正在进行中的取流。
+   *
+   * 为什么必须有：界面会在**鼠标悬停时预热**，而用户往往在预热还没结束时
+   * 就点了播放。没有这张表的话，那一下点击会另开一轮竞速 —— 用户多等一次完整解析，
+   * 预热等于白做。有了它，点击直接搭上那一趟，返回时间就是「预热剩余时间」。
+   *
+   * key 与缓存同构（歌 + 音质），所以预热与正式取流天然合流。
+   */
+  private readonly inflight = new Map<string, Promise<MusicUrlResult>>()
 
   constructor(deps: ResolverDeps) {
     this.deps = deps
@@ -157,7 +184,57 @@ export class MusicResolver {
    * 取播放地址。
    * 成功时返回的 url 已经过本地代理包装，可直接交给 <audio>。
    */
+  /**
+   * 预热：把取流结果**提前算好放进缓存**，用户真的点播放时直接命中。
+   * 失败一律吞掉 —— 预热是抢时间，绝不能因为失败影响任何既有流程。
+   */
+  async prefetch(song: Song, quality?: Quality): Promise<MusicUrlResult | null> {
+    try {
+      const cached = this.readCache(song, quality)
+      if (cached) return cached
+      /*
+       * 返回地址（失败返回 null）——调用方还需要它去**预热媒体本身**。
+       * 实测：只算 URL 只能省掉约 450ms，而「点击到真的出声」还有约 900ms
+       * 花在媒体缓冲上。把地址交回去，界面就能用隐藏元素先把开头的数据拉下来，
+       * 点击时浏览器直接命中缓存，那 900ms 才是真正的大头。
+       */
+      return await this.resolve({ song, quality })
+    } catch {
+      /* 预热失败无所谓，正式播放时会重新解析并给出真实错误 */
+      return null
+    }
+  }
+
   async resolve(req: MusicUrlRequest): Promise<MusicUrlResult> {
+    const { song } = req
+
+    /**
+     * 已有同一首歌的解析在进行 → 直接搭车。
+     *
+     * 这一条同时解决两个问题：
+     *   1. 预热与点击撞车时不会重复竞速（用户点击后几乎立刻拿到结果）；
+     *   2. 连点同一首歌不会打出多轮请求。
+     * 显式指定音源的调用不参与合流 —— 那是「用户点名要试某个源」，语义不同。
+     */
+    const explicit = (req.sourceIds?.length ?? 0) > 0
+    if (!explicit && song.platform !== 'local') {
+      const key = this.cacheKey(song, req.quality)
+      const running = this.inflight.get(key)
+      if (running) return running
+
+      const task = this.resolveInner(req)
+      this.inflight.set(key, task)
+      try {
+        return await task
+      } finally {
+        this.inflight.delete(key)
+      }
+    }
+
+    return this.resolveInner(req)
+  }
+
+  private async resolveInner(req: MusicUrlRequest): Promise<MusicUrlResult> {
     const { song } = req
     const attempts: SourceAttempt[] = []
 
@@ -180,10 +257,38 @@ export class MusicResolver {
       return cached
     }
 
-    const candidates = this.pickCandidates(song, req.sourceIds)
+    let candidates = this.pickCandidates(song, req.sourceIds)
+
+    /**
+     * ① 音源还在装载时**不要急着说「找不到音源」**。
+     *
+     * 刚启动应用的那十几秒里，多数音源还没走完 inited 握手，`findCapable` 会一个都挑不出来。
+     * 用户这时点播放，旧代码会立刻抛「没有可用于该平台的音源」—— 而实际上只是还没加载完，
+     * 再等一会儿歌就能放。等一会儿比报错诚实得多。
+     */
+    if (candidates.length === 0 && !explicitSources) {
+      const deadline = Date.now() + SOURCE_WAIT_MS
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 150))
+        candidates = this.pickCandidates(song, req.sourceIds)
+        if (candidates.length > 0) break
+      }
+    }
+
+    /**
+     * ② 候选偏少时把**冷却中的也放回来**。
+     *
+     * 自动换源会给失败的音源上冷却，多首歌累积下来可能把某个平台的音源全冷却掉，
+     * 于是「找不到音源」。冷却只是优化，不该让歌听不了 —— 候选不够就无视它。
+     */
+    if (candidates.length < MIN_CANDIDATES && !explicitSources) {
+      const relaxed = this.pickCandidates(song, req.sourceIds, true)
+      if (relaxed.length > candidates.length) candidates = relaxed
+    }
+
     if (candidates.length === 0) {
       throw new Error(
-        `没有可用于「${song.platform}」平台的音源，请先在音源管理页导入并启用音源`
+        `没有可用于「${song.platform}」平台的音源。请到音源管理页确认已导入并启用了支持该平台的音源`
       )
     }
 
@@ -208,6 +313,27 @@ export class MusicResolver {
       // 显式指定音源的调用不写缓存，免得把它当成「这首歌的默认地址」缓存住
       if (!explicitSources) this.writeCache(song, req.quality, result)
       return result
+    }
+
+    /**
+     * ③ 最后一搏：无视冷却，把该平台**全部**可用音源再完整跑一遍。
+     *
+     * 走到这里说明常规候选全失败了。与其直接报「找不到」，不如把冷却中的、
+     * 排在后面的统统再试一次 —— 用户宁可多等两秒，也不愿意看到「这首歌听不了」。
+     * 这也是「不想让它找不到」的兜底：只要系统里还存在任何一个支持该平台的音源，
+     * 就一定会去试。
+     */
+    if (!explicitSources) {
+      const all = this.pickCandidates(song, req.sourceIds, true)
+      if (all.length > 0) {
+        this.deps.onLog?.('info', 'resolver', `常规候选全失败，无视冷却重试全部 ${all.length} 个音源`)
+        const lastChance = await this.attemptLadder(all, ladder, song, attempts)
+        if (lastChance) {
+          const result = this.buildResult(lastChance.hit, song, lastChance.quality, attempts)
+          this.writeCache(song, req.quality, result)
+          return result
+        }
+      }
     }
 
     // 所有音质层都失败，用错误汇总给出可读原因
@@ -289,8 +415,14 @@ export class MusicResolver {
 
   /* ------------------------------ 候选与音质 ------------------------------ */
 
-  /** 决定候选音源：显式指定优先，否则按能力自动挑选 */
-  private pickCandidates(song: Song, sourceIds?: string[]): LoadedSource[] {
+  /**
+   * 决定候选音源：显式指定优先，否则按能力自动挑选。
+   *
+   * ignoreCooldown=true 时把「刚失败过、正在冷却」的音源也纳入。
+   * 冷却只是**避免反复踩同一个坑的优化**，绝不能变成「因为我们都试过了，
+   * 所以这首歌你听不了」的拒绝理由 —— 所有候选都在冷却时，取流方会带这个开关再问一次。
+   */
+  private pickCandidates(song: Song, sourceIds?: string[], ignoreCooldown = false): LoadedSource[] {
     if (sourceIds && sourceIds.length > 0) {
       const picked: LoadedSource[] = []
       for (const id of sourceIds) {
@@ -301,7 +433,7 @@ export class MusicResolver {
       }
       if (picked.length > 0) return picked
     }
-    return this.deps.sources.findCapable(song.platform, 'musicUrl')
+    return this.deps.sources.findCapable(song.platform, 'musicUrl', undefined, { ignoreCooldown })
   }
 
   /** 音源是否声明支持某 action */

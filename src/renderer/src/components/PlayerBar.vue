@@ -11,6 +11,7 @@ import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { formatTime } from '../utils/format'
+import { copyText, songCopyText } from '../utils/clipboard'
 
 const player = usePlayerStore()
 const downloads = useDownloadStore()
@@ -103,6 +104,32 @@ watch(qualityMenuOpen, (open) => {
     qualityMenuOpen.value = false
   }
   document.addEventListener('click', close, { once: true })
+})
+
+/* ------------------------------ 复制歌名 ------------------------------ */
+
+/**
+ * 刚刚复制成功的反馈。
+ *
+ * 复制没有视觉结果，不做反馈用户会反复点。用按钮变对勾 1.4 秒代替 toast ——
+ * 不打断、不遮挡，且恰好是「确认收到」的最小表达。
+ */
+const copiedName = ref(false)
+let copiedNameTimer: ReturnType<typeof setTimeout> | null = null
+
+async function copyCurrentName(): Promise<void> {
+  const ok = await copyText(songCopyText(player.current))
+  if (!ok) return
+  copiedName.value = true
+  if (copiedNameTimer) clearTimeout(copiedNameTimer)
+  copiedNameTimer = setTimeout(() => {
+    copiedName.value = false
+    copiedNameTimer = null
+  }, 1400)
+}
+
+onBeforeUnmount(() => {
+  if (copiedNameTimer) clearTimeout(copiedNameTimer)
 })
 
 const isCurrentFavorite = computed(() =>
@@ -454,6 +481,16 @@ function openPlaylistMenu(event: MouseEvent): void {
         <span v-if="player.urlInfo" class="src-name ellipsis" :title="player.urlInfo.sourceName">
           {{ player.urlInfo.sourceName }}
         </span>
+
+        <button
+          class="icon-btn"
+          :class="{ on: copiedName }"
+          :disabled="!player.current"
+          :title="copiedName ? '已复制' : '复制歌名（歌手 - 歌名）'"
+          @click="copyCurrentName"
+        >
+          <AppIcon :name="copiedName ? 'check' : 'copy'" :size="16" />
+        </button>
 
         <button class="icon-btn" :title="player.modeLabel" @click="player.cycleMode()">
           <AppIcon :name="MODE_ICON[player.mode]" :size="16" />

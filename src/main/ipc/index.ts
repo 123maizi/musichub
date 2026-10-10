@@ -7,7 +7,7 @@
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron'
 import { existsSync } from 'node:fs'
 
-import type { Lyric, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
+import type { Lyric, MusicUrlRequest, Quality, SearchRequest, Song } from '@shared/types/music'
 import type { AiConfig } from '@shared/types/ai'
 import type { SavedTranslation } from '@shared/types/ai'
 import { AI_PRESETS } from '@shared/types/ai'
@@ -109,6 +109,17 @@ export function registerIpc(ctx: IpcContext): () => void {
   /* ------------------------------ 播放 ------------------------------ */
 
   ipcMain.handle(CH.playGetUrl, (_e, req: MusicUrlRequest) => resolver.resolve(req))
+
+  /**
+   * 预热：界面在鼠标悬停歌曲时调用，提前把取流结果算好。
+   *
+   * 这是「几乎 0 秒出声」的关键 —— 用户从悬停到点下播放通常有几百毫秒，
+   * 足够把竞速跑完。真点击时与预热合流（同一次解析只跑一趟），直接命中缓存。
+   * 失败静默吞掉：预热只是抢时间，不该产生任何用户可见的后果。
+   */
+  ipcMain.handle(CH.playPrefetch, (_e, song: Song, quality?: Quality) =>
+    resolver.prefetch(song, quality)
+  )
 
   ipcMain.handle(CH.playGetLyric, (_e, song: Song, sourceIds?: string[]) =>
     resolver.getLyric(song, sourceIds)

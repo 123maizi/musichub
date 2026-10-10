@@ -241,15 +241,26 @@ export class SourceManager extends EventEmitter {
    * @param action   需要的 action
    * @param minQuality 最低音质要求（可选）
    */
-  findCapable(platform: PlatformId, action: SourceAction, minQuality?: Quality): LoadedSource[] {
+  findCapable(
+    platform: PlatformId,
+    action: SourceAction,
+    minQuality?: Quality,
+    opts?: { ignoreCooldown?: boolean }
+  ): LoadedSource[] {
     const min = minQuality ? qualityRank(minQuality) : 0
     const result: LoadedSource[] = []
 
     for (const src of this.sources.values()) {
       if (src.info.status !== 'ready') continue
       if (!this.isEnabled(src.id)) continue
-      // 刚在这个平台上失败过的音源先跳过
-      if (this.isCoolingDown(src.id, platform)) continue
+      /**
+       * 刚在这个平台上失败过的音源先跳过。
+       *
+       * 但可以显式忽略（ignoreCooldown）—— 冷却机制是「避免反复踩同一个坑」的优化，
+       * 不该变成「因为我们都试过了所以这首歌听不了」的拒绝理由。
+       * 所有候选都在冷却时，取流方会带这个开关再问一次。
+       */
+      if (!opts?.ignoreCooldown && this.isCoolingDown(src.id, platform)) continue
       const cap = src.info.capabilities.find((c) => c.platform === platform)
       if (!cap) continue
       if (!cap.actions.includes(action)) continue

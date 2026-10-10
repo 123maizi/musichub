@@ -619,6 +619,13 @@ export const usePlayerStore = defineStore('player', () => {
   const PLAY_LOAD_TIMEOUT = 12000
   /** 媒体无法播放时最多自动换几次源 */
   const MAX_PLAY_RETRY = 3
+  /**
+   * 加载尝试的序号。
+   *
+   * 用来判断「某次 loadAndPlay 是不是已经被后来的一次接手了」——
+   * 迟到的 play() 成功只在**没有更新尝试**时才该被按掉，否则会误杀重试后的正常播放。
+   */
+  let loadAttemptSeq = 0
 
   /**
    * 加载并开始播放，带**超时**与**媒体错误**捕获。
@@ -647,6 +654,7 @@ export const usePlayerStore = defineStore('player', () => {
       timer = setTimeout(() => resolve('timeout'), timeoutMs)
     })
 
+    const attemptId = ++loadAttemptSeq
     el.src = url
     const playSettled = el.play().then(
       () => 'ok' as const,
@@ -656,7 +664,35 @@ export const usePlayerStore = defineStore('player', () => {
     const outcome = await Promise.race([playSettled, errorHit, timedOut])
     if (timer) clearTimeout(timer)
     if (onError) el.removeEventListener('error', onError)
-    return token !== playToken ? 'stale' : outcome
+
+    const resolved = token !== playToken ? 'stale' : outcome
+
+    /**
+     * ★ 迟到的成功必须被按掉。
+     *
+     * `Promise.race` 输掉的那个分支**不会取消**：判定超时返回之后，
+     * 那个 `el.play()` 可能过很久才成功 —— 一旦成功，浏览器就真的开始出声。
+     * 于是出现这个很怪的现象：界面已经说了「播放失败」，人挂后台打游戏去了，
+     * 几分钟后音乐突然自己响起来。用户报的就是这个。
+     *
+     * 守卫里要排除两种情况，否则会误杀正常播放：
+     *   1. 已经有**更新的一次尝试**接手（重试换源了）—— 那是它在管这个元素；
+     *   2. 这一代已经作废（用户又点了别的歌）。
+     */
+    if (resolved !== 'ok') {
+      void playSettled.then((late) => {
+        if (late !== 'ok') return
+        if (attemptId !== loadAttemptSeq) return
+        if (token !== playToken) return
+        try {
+          el.pause()
+        } catch {
+          /* 元素状态不允许暂停时忽略 */
+        }
+      })
+    }
+
+    return resolved
   }
 
   /** 播放指定歌曲；传入 list 时会替换整个播放队列 */
@@ -802,6 +838,16 @@ export const usePlayerStore = defineStore('player', () => {
             ? `播放失败：已试过 ${MAX_PLAY_RETRY} 个音源都迟迟没有数据，换首歌或稍后再试`
             : `播放失败：已试过 ${MAX_PLAY_RETRY} 个音源都无法播放这首歌`
         playing.value = false
+        /*
+         * 彻底失败时显式停掉元素。
+         * 这是「已经说了失败，就不能过一会儿又自己响起来」的最后一道闸 ——
+         * 迟到的 play() 由 loadAndPlay 里的守卫按掉，这里再兜一层。
+         */
+        try {
+          ensureAudio().pause()
+        } catch {
+          /* 忽略 */
+        }
         return
       }
       error.value = null
@@ -816,6 +862,9 @@ export const usePlayerStore = defineStore('player', () => {
        */
       if (Number.isFinite(el.duration) && el.duration > 0) mediaDuration.value = el.duration
       playing.value = true
+
+      // 顺手把队列里的下一首也预热掉：按「下一首」时同样几乎 0 秒
+      prewarmNext()
 
       // 歌词是锦上添花，失败了不打扰用户
       void loadLyric(song)
@@ -841,6 +890,102 @@ export const usePlayerStore = defineStore('player', () => {
         awaitingStream = false
       }
     }
+  }
+
+  /* ------------------------------ 预热（几乎 0 秒出声） ------------------------------ */
+
+  /**
+   * 预热是「几乎 0 秒听歌」的关键：
+   * 用户把鼠标移到某首歌到真的点下去，通常有几百毫秒 —— 足够把取流竞速跑完。
+   * 真点击时与预热合流（主进程保证同一次解析只跑一趟），于是直接命中结果。
+   *
+   * 三个约束，都是为了避免预热本身变成负担：
+   */
+  /** 悬停多久才真的发请求 —— 快速划过整列不该产生任何请求 */
+  const PREFETCH_HOVER_MS = 120
+  /** 同时在跑的预热上限 */
+  const MAX_PREFETCH_CONCURRENT = 2
+
+  /** 已预热过的「歌 + 音质」；地址带签名且几分钟失效，重复预热没有收益 */
+  const prefetched = new Set<string>()
+  let prefetchRunning = 0
+  let prefetchTimer: ReturnType<typeof setTimeout> | null = null
+  let prefetchPending: Song | null = null
+
+  /**
+   * 媒体预热用的隐藏音频元素。
+   *
+   * 为什么光算地址不够：实测「点击到真的出声」约 1.3 秒，而地址解析只占 450ms ——
+   * 剩下约 900ms 全花在**媒体缓冲**（建连、下开头的数据、解码器起步）上。
+   * 所以悬停时除了算地址，还用一个 preload=auto 的隐藏元素把开头数据拉下来。
+   * 真播放用的是同一个代理地址，Chromium 的媒体缓存会直接命中，
+   * 那 900ms 里的绝大部分就被提前消化掉了。
+   *
+   * 只保留一个：预热的永远是「用户此刻最可能点的那首」，替换即可，
+   * 不必开一堆元素占内存和带宽。
+   */
+  let warmEl: HTMLAudioElement | null = null
+  let warmedUrl = ''
+
+  function warmMedia(url: string): void {
+    if (!url || url === warmedUrl) return
+    warmedUrl = url
+    try {
+      if (!warmEl) {
+        warmEl = new Audio()
+        warmEl.preload = 'auto'
+        warmEl.muted = true
+        // 只缓冲、绝不发声。volume=0 也挡不住出声，必须是 muted + 不 play()
+        warmEl.volume = 0
+      } else {
+        warmEl.removeAttribute('src')
+      }
+      warmEl.src = url
+      // 触发加载算法但不播放
+      warmEl.load()
+    } catch {
+      /* 预热失败无所谓 */
+    }
+  }
+
+  /** 鼠标停在某一首上时调用（界面侧做去抖，这里再兜一层） */
+  function prefetchSong(song: Song | null | undefined): void {
+    if (!song || song.platform === 'local') return
+    const key = `${song.id}|${quality.value}`
+    if (prefetched.has(key)) return
+    prefetched.add(key)
+    prefetchPending = song
+    if (prefetchTimer) clearTimeout(prefetchTimer)
+    prefetchTimer = setTimeout(() => {
+      prefetchTimer = null
+      const target = prefetchPending
+      prefetchPending = null
+      if (!target || prefetchRunning >= MAX_PREFETCH_CONCURRENT) return
+      prefetchRunning += 1
+      void window.api.player
+        .prefetch(target, quality.value)
+        .then((res) => {
+          const url = (res as { url?: string } | null)?.url
+          if (url) warmMedia(url)
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          prefetchRunning -= 1
+        })
+    }, PREFETCH_HOVER_MS)
+  }
+
+  /**
+   * 播起来之后顺手预热队列里的下一首。
+   *
+   * 这样按「下一首」也接近 0 秒 —— 而「下一首」恰恰是最需要快的动作：
+   * 用户已经听完一首，情绪是连贯的，任何等待都会被放大。
+   */
+  function prewarmNext(): void {
+    if (mode.value === 'shuffle') return
+    const idx = nextIndex()
+    const next = idx >= 0 ? playlist.value[idx] : undefined
+    if (next && next.id !== current.value?.id) prefetchSong(next)
   }
 
   /* ------------------------------ 现成的官方翻译 ------------------------------ */
@@ -1394,6 +1539,8 @@ export const usePlayerStore = defineStore('player', () => {
     translationOptions,
     activeTranslationId,
     applyTranslationOption,
+    // 预热：悬停即开始解析，点击几乎 0 等待
+    prefetchSong,
     editing,
     editLines,
     savingEdit,

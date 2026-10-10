@@ -43,6 +43,8 @@ export type IconName =
   | 'trash'
   | 'edit'
   | 'translate'
+  | 'copy'
+  | 'check'
 
 /** 实心路径：播放控制与状态标记 */
 const FILLED_PATHS: Partial<Record<IconName, string>> = {
@@ -78,7 +80,11 @@ const STROKE_PATHS: Partial<Record<IconName, string>> = {
   back: 'M19 12H5M11 18l-6-6 6-6',
   // 地球：翻译/语言。三条子路径合成一个 d（模板只渲染单条 path）
   translate:
-    'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 3c2.5 2.4 3.8 5.4 3.8 9s-1.3 6.6-3.8 9c-2.5-2.4-3.8-5.4-3.8-9S9.5 5.4 12 3 M3.4 12h17.2'
+    'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 3c2.5 2.4 3.8 5.4 3.8 9s-1.3 6.6-3.8 9c-2.5-2.4-3.8-5.4-3.8-9S9.5 5.4 12 3 M3.4 12h17.2',
+  // 复制：两张叠起来的纸
+  copy: 'M9 3h8a2 2 0 0 1 2 2v10M15 7H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z',
+  // 对勾：复制成功的即时反馈
+  check: 'M4.5 12.5l5 5 10-11'
 }
 </script>
 

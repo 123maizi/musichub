@@ -6,7 +6,7 @@
  */
 import { contextBridge, ipcRenderer } from 'electron'
 import { CH, EV } from '@shared/ipc-channels'
-import type { Lyric, LyricTranslateResult, MusicUrlRequest, SearchRequest, Song } from '@shared/types/music'
+import type { Lyric, LyricTranslateResult, MusicUrlRequest, Quality, SearchRequest, Song } from '@shared/types/music'
 import type { AiConfig, AiTestResult, SavedTranslation } from '@shared/types/ai'
 import type {
   DownloadAddRequest,
@@ -76,6 +76,11 @@ const api = {
   /* ------------------------------ 播放 ------------------------------ */
   player: {
     getUrl: (req: MusicUrlRequest) => invoke(CH.playGetUrl, req),
+    /**
+     * 预热：悬停歌曲时提前解析，让真正的播放几乎没有等待。
+     * 失败静默（主进程吞掉），调用方无需关心成败。
+     */
+    prefetch: (song: Song, quality?: Quality) => invoke(CH.playPrefetch, song, quality),
     getLyric: (song: Song, sourceIds?: string[]) =>
       invoke(CH.playGetLyric, song, sourceIds) as Promise<Lyric | null>,
     /**

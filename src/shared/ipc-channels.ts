@@ -27,6 +27,8 @@ export const CH = {
   searchAlbums: 'search:albums',
   // 播放
   playGetUrl: 'play:getUrl',
+  /** 预热：提前把取流结果算好放进缓存，用户点播放时直接命中（目标：几乎 0 秒出声） */
+  playPrefetch: 'play:prefetch',
   playGetLyric: 'play:getLyric',
   /** 收集各平台「本来就翻好的」官方翻译歌词（省掉自己跑 AI 的时间） */
   playLyricTranslations: 'play:lyricTranslations',
