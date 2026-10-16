@@ -624,8 +624,22 @@ if (CMD === 'viewport') {
     await sleep(300)
     await ev(`window.__recOn = false`)
     const rec = JSON.parse(await ev(`JSON.stringify(window.__rec)`))
-    // 只看拖动期间（seeking=true 且指针已移动）
-    const during = rec.filter((f) => f[4] === 'true' && f[9] !== null && f[1] !== null)
+    /**
+     * 只取「指针确实移动了的那些帧」。
+     *
+     * ⚠️ 不要用 `data-seeking === 'true'` 当筛选条件：那个隐藏状态出口挂在
+     * **底部播放条**上，它的 seeking 是播放条自己那个 composable 实例的；
+     * 拖正在播放页的大进度条时它一直是 false，于是筛选出 0 帧（实测踩到过）。
+     * 「指针这一帧动了没有」与测哪一条无关，两条都适用。
+     */
+    const during = []
+    for (let i = 1; i < rec.length; i += 1) {
+      const f = rec[i]
+      const prev = rec[i - 1]
+      if (f[1] === null || f[9] === null) continue
+      if (f[10] === prev[10]) continue
+      during.push(f)
+    }
     const errs = during.map((f) => Math.abs(f[1] - f[9]))
     const railW = railR.w
     results.push({
