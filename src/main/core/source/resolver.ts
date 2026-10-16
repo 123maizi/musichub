@@ -391,11 +391,23 @@ export class MusicResolver {
      * 注意不是简单的 Promise.race：两边都可能返回 null（没歌词），
      * 只认「非空」才算赢 —— 否则先返回的那个 null 会把还在跑的好结果一起废掉。
      */
+    /**
+     * 「已经拿到歌词」的信号。
+     *
+     * 为什么需要它：两条链并发时，输的那条**没人 await 它，它会继续跑完**。
+     * 音源脚本是有状态的第三方代码（内部缓存、token、单例），
+     * 在用户已经能看到歌词之后还持续调用它们，既浪费请求，
+     * 也可能和正在进行的取流互相干扰。所以一旦有结果，就让音源链立刻收手。
+     */
+    const stop = { done: false }
+
     const bySource = (async (): Promise<Lyric | null> => {
       for (const src of candidates) {
+        if (stop.done) return null
         const started = Date.now()
         try {
           const raw = await this.dispatch(src, 'lyric', song, '128k')
+          if (stop.done) return null
           const lyric = this.normalizeLyric(raw)
           if (lyric && (lyric.lyric || lyric.tlyric)) {
             this.deps.sources.recordStat(src.id, true, Date.now() - started)
@@ -425,7 +437,9 @@ export class MusicResolver {
       })
       .catch(() => null)
 
-    return firstNonEmpty([bySource, byBuiltin])
+    const winner = await firstNonEmpty([bySource, byBuiltin])
+    stop.done = true
+    return winner
   }
 
   /* ------------------------------ 候选与音质 ------------------------------ */
