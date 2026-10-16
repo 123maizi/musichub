@@ -586,9 +586,6 @@ async function saveCover(): Promise<void> {
             用户分不清是在等、还是根本没有。现在等待与「没找到」都明说，并指路 AI。
           -->
           <span v-if="player.translationLoading" class="translate-note faint">正在查找现成译文…</span>
-          <span v-else-if="player.fillingTranslation" class="translate-note faint">
-            正在用 AI 补齐剩余几行译文…
-          </span>
           <span
             v-else-if="
               player.translationEmpty &&
@@ -638,6 +635,16 @@ async function saveCover(): Promise<void> {
         </div>
 
         <div v-else ref="lyricBox" class="lyric-box">
+          <!--
+            歌曲信息（作词/作曲/编曲/制作人…）单独放在最上面，不再混进歌词流。
+            这些行是元信息、通常没有译文，混在歌词里正是「一半有中文一半没有」的观感来源
+            （实测 Shape of You 116 行里有 24 行是这类）。信息不丢，只是不占歌词的位置。
+          -->
+          <div v-if="player.lyricInfoLines.length" class="lyric-info">
+            <span v-for="(info, index) in player.lyricInfoLines" :key="index" class="lyric-info-item">
+              {{ info.text }}
+            </span>
+          </div>
           <div class="lyric-pad"></div>
           <div
             v-for="(line, index) in player.lyricLines"
@@ -1145,6 +1152,29 @@ async function saveCover(): Promise<void> {
 
 .lyric-line:hover {
   background: var(--surface-3);
+}
+
+/**
+ * 歌曲信息行（作词/作曲/制作人…）。
+ *
+ * 刻意做得明显「不像歌词」：小字号、淡色、不参与当前行高亮、不可点击跳转 ——
+ * 这样用户一眼就知道这部分不是歌词，也不会去数「这几行为什么没有中文」。
+ */
+.lyric-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  margin-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--hairline);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--ink-faint, var(--ink-muted));
+  opacity: 0.75;
+}
+
+.lyric-info-item {
+  white-space: nowrap;
 }
 
 /* ------------------------------ 歌词翻译 ------------------------------ */

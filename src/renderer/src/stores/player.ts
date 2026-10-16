@@ -15,6 +15,7 @@ import {
   parseLrc,
   parseLrcWithTranslation,
   isLyricMetaLine,
+  splitLyricLines,
   translationCoverage,
   type LyricLine
 } from '../utils/format'
@@ -75,6 +76,23 @@ export const usePlayerStore = defineStore('player', () => {
 
   const lyricRaw = ref<Lyric | null>(null)
   const lyricLines = ref<LyricLine[]>([])
+  /**
+   * 歌曲信息行（作词/作曲/编曲/制作人/和声/吉他…）。
+   *
+   * 从歌词流里分出来：这些行通常没有译文，混在歌词里会让用户以为「只翻译了一半」
+   * （实测 Shape of You 116 行里 24 行是这类）。信息不丢，界面上单独展示。
+   */
+  const lyricInfoLines = ref<LyricLine[]>([])
+
+  /**
+   * 所有写歌词的地方统一走这里：拆出信息行、丢掉纯符号行。
+   * 集中一处是刻意的 —— 分散在七八个赋值点里，漏一个就会出现「这首歌又有 credits 了」。
+   */
+  function setLyricLines(next: LyricLine[]): void {
+    const { lines, info } = splitLyricLines(next)
+    lyricLines.value = lines
+    lyricInfoLines.value = info
+  }
 
   /** 歌词翻译状态：进行中 / 已翻译 / 失败原因 */
   const translating = ref(false)
@@ -762,7 +780,7 @@ export const usePlayerStore = defineStore('player', () => {
     error.value = null
     urlInfo.value = null
     attempts.value = []
-    lyricLines.value = []
+    setLyricLines([])
     lyricRaw.value = null
     // 翻译状态跟着歌曲走，切歌必须清干净，否则会把上一首的译文留在界面上
     translated.value = false
@@ -1069,14 +1087,14 @@ export const usePlayerStore = defineStore('player', () => {
     activeTranslationId.value = id
     const opt = translationOptions.value.find((o) => o.id === id)
     if (!opt) {
-      lyricLines.value = parseLrcWithTranslation(main, undefined)
+      setLyricLines(parseLrcWithTranslation(main, undefined))
       translated.value = false
       translatedSongId.value = ''
       savedProvider.value = ''
       savedProviderName.value = ''
       return
     }
-    lyricLines.value = parseLrcWithTranslation(main, opt.tlyric)
+    setLyricLines(parseLrcWithTranslation(main, opt.tlyric))
     translated.value = lyricLines.value.some((line) => !!line.trans)
     translatedSongId.value = translated.value ? (current.value?.id ?? '') : ''
     savedProvider.value = 'official'
@@ -1175,14 +1193,14 @@ export const usePlayerStore = defineStore('player', () => {
       clearTimeout(timer)
       if (translationFetchFor === song.id && !timedOut) translationLoading.value = false
       /**
-       * 补齐/整首翻译统一在这里触发 —— 这是「译文这件事已经尘埃落定」的唯一时刻。
+       * 自动补齐译文已**下线**（1.4.11）。
        *
-       * 之前分别挂在 loadLyric 和 applyTranslationOption 上，结果是两次触发互相打架：
-       * 平台自带译文先触发一次补齐（要好几秒），随后官方译文到达又触发一次，
-       * 第二次被「正在补齐」的互斥挡掉 —— 最终留下的是官方那份**没翻全**的译文，
-       * 用户看到的还是一半。实测 Shape of You 135 行里 50 行没译文就是这个原因。
+       * 实测结论：平台现成译文对真正的歌词行覆盖 96~100%（Lemon 100%、残酷 96.1%、
+       * Dynamite 92.5%），少数英文歌的「缺口」几乎全是 credits 与拟声行 ——
+       * 也就是说 AI 补齐在绝大多数歌上没有活可干，却引入了网络请求、不确定性与成本。
+       * ensureCompleteTranslation / fillMissingTranslations 保留在 store 上（接口不删），
+       * 需要时可以手动调用，只是不再自动跑。
        */
-      if (current.value?.id === song.id) void ensureCompleteTranslation()
     }
   }
 
@@ -1198,7 +1216,7 @@ export const usePlayerStore = defineStore('player', () => {
       lyricRaw.value = lyric
       const main = lyric.lyric || lyric.lxlyric || ''
       // 平台自带翻译（QQ、网易云常有）直接合并展示，不用再翻
-      lyricLines.value = parseLrcWithTranslation(main, lyric.tlyric)
+      setLyricLines(parseLrcWithTranslation(main, lyric.tlyric))
       translated.value = lyricLines.value.some((line) => !!line.trans)
       translateError.value = ''
       translatedSongId.value = translated.value ? song.id : ''
@@ -1216,7 +1234,7 @@ export const usePlayerStore = defineStore('player', () => {
       if (!translated.value) {
         const saved = await getSavedTranslation(song.id)
         if (saved && current.value?.id === song.id && saved.tlyric.trim()) {
-          lyricLines.value = parseLrcWithTranslation(main, saved.tlyric)
+          setLyricLines(parseLrcWithTranslation(main, saved.tlyric))
           translated.value = lyricLines.value.some((line) => !!line.trans)
           translatedSongId.value = song.id
           savedEdited.value = saved.edited
@@ -1234,7 +1252,7 @@ export const usePlayerStore = defineStore('player', () => {
     } catch {
       // 已经切歌了就别动界面上的歌词：这次失败属于上一首
       if (current.value?.id !== song.id) return
-      lyricLines.value = []
+      setLyricLines([])
       translated.value = false
     }
   }
@@ -1271,7 +1289,7 @@ export const usePlayerStore = defineStore('player', () => {
 
       lyricRaw.value = result.lyric
       const main = result.lyric.lyric || result.lyric.lxlyric || ''
-      lyricLines.value = parseLrcWithTranslation(main, result.lyric.tlyric)
+      setLyricLines(parseLrcWithTranslation(main, result.lyric.tlyric))
 
       /**
        * 最后一道保险：一句译文都没贴上，就不算翻译成功。
@@ -1468,8 +1486,8 @@ export const usePlayerStore = defineStore('player', () => {
     if (!tlyric.trim()) return false
     const before = lyricLines.value.map((line) => line.trans)
     const merged = mergeTranslation(lyricLines.value, tlyric)
-    lyricLines.value = merged.map((line, index) =>
-      before[index] ? { ...line, trans: before[index] } : line
+    setLyricLines(
+      merged.map((line, index) => (before[index] ? { ...line, trans: before[index] } : line))
     )
     const has = lyricLines.value.some((line) => !!line.trans)
     if (has) {
@@ -1612,7 +1630,7 @@ export const usePlayerStore = defineStore('player', () => {
       if (!tlyric.trim()) {
         // 全空 = 不要译文了
         await deleteSavedTranslation(song.id)
-        lyricLines.value = parseLrcWithTranslation(main)
+        setLyricLines(parseLrcWithTranslation(main))
         translated.value = false
         savedEdited.value = false
         savedProvider.value = ''
@@ -1632,7 +1650,7 @@ export const usePlayerStore = defineStore('player', () => {
       // 保存期间换歌了：译文已经落库，但界面属于新歌，别把旧状态写回去
       if (current.value?.id !== song.id) return true
 
-      lyricLines.value = parseLrcWithTranslation(main, tlyric)
+      setLyricLines(parseLrcWithTranslation(main, tlyric))
       translated.value = lyricLines.value.some((line) => !!line.trans)
       translatedSongId.value = song.id
       savedEdited.value = true
@@ -1662,7 +1680,7 @@ export const usePlayerStore = defineStore('player', () => {
     // 删除期间换歌了：别把上一首的歌词状态写到新歌界面上
     if (current.value?.id !== song.id) return
     const main = lyricRaw.value?.lyric || lyricRaw.value?.lxlyric || ''
-    lyricLines.value = parseLrcWithTranslation(main, lyricRaw.value?.tlyric)
+    setLyricLines(parseLrcWithTranslation(main, lyricRaw.value?.tlyric))
     translated.value = lyricLines.value.some((line) => !!line.trans)
     translatedSongId.value = translated.value ? song.id : ''
     savedEdited.value = false
@@ -1857,6 +1875,9 @@ export const usePlayerStore = defineStore('player', () => {
     translationLoading,
     translationEmpty,
     fillingTranslation,
+    // 自动补齐已下线，接口保留（见 loadTranslationOptions 里的说明）
+    ensureCompleteTranslation,
+    fillMissingTranslations,
     applyTranslationOption,
     // 预热：悬停即开始解析，点击几乎 0 等待
     prefetchSong,
@@ -1868,6 +1889,7 @@ export const usePlayerStore = defineStore('player', () => {
     currentLyricIndex,
     hasLyric,
     lyricNeedsTranslation,
+    lyricInfoLines,
     hasTranslation,
     // 动作
     play,

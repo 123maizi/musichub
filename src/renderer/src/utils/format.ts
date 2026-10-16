@@ -187,11 +187,71 @@ export function mergeTranslation(lines: LyricLine[], tlyric?: string): LyricLine
  * 既慢又没意义，用户要的是歌词有中文。
  * 判定只看行首的角色词，宁少不多：判错顶多是多补一行。
  */
+/**
+ * ⚠️ 结尾**不能**用 `\b`。
+ * `\b` 是「\w 与非 \w 的边界」，而汉字不属于 \w —— 「制作人 : Steve Mac」里
+ * 「人」和空格之间根本没有边界，于是所有中文角色词（制作人/作词/作曲/主人声…）
+ * 全部漏判、继续混在歌词流里（实测第一次就漏了 24 行里的大部分）。
+ * 改成「后面跟冒号、空白或行尾」才认。
+ */
 const META_ROLE =
-  /^\s*(作词|作曲|编曲|制作人|出品|监制|混音|母带|录音|配唱|和声|主人声|人声|吉他|贝斯|鼓|键盘|弦乐|钢琴|词|曲|OP|SP|Producer|Writer|Composer|Arranger|Lyricist|Mixed|Mastered|Recorded|Sample|Label|Vocals?|Guitar|Bass|Drums|Piano|Strings)\b/i
+  /^\s*(作词|作曲|编曲|制作人|出品|监制|混音|母带|录音|配唱|和声|主人声|人声|吉他|贝斯|鼓|键盘|弦乐|钢琴|词|曲|OP|SP|Producer|Writer|Composer|Arranger|Lyricist|Mixed|Mastered|Recorded|Sample|Label|Vocals?|Guitar|Bass|Drums|Piano|Strings)(?=\s*[:：]|\s|$)/i
 
 export function isLyricMetaLine(text: string): boolean {
   return META_ROLE.test(text)
+}
+
+/**
+ * 纯符号行（`·`、`—`、`...`、`~` 等）。
+ *
+ * 平台歌词里用它们做段落分隔或占位 —— 没有歌词意义，也没有中文可翻。
+ * 显示出来只会让用户以为「这行没翻译」。
+ */
+const NOISE_ONLY = /^[\s·•‧∙—–\-~～…\.、,，;；:：!！?？*×=＋+"'“”‘’()（）\[\]【】]+$/
+
+export function isLyricNoiseLine(text: string): boolean {
+  const t = text.replace(/\[[^\]]*\]/g, '').trim()
+  return t.length === 0 || NOISE_ONLY.test(t)
+}
+
+/**
+ * 拟声 / 语气行：Yeah、Hey、Oh—i—oh—i、La la la…
+ *
+ * 它们**不是没翻**，而是本来就没有语义可翻。实测 Blinding Lights 里
+ * `Yeah` / `Hey, hey, hey` 都被算成了「缺译文」，把覆盖率白白拉低。
+ */
+const INTERJECTION =
+  /^(?:(?:yeah|yea|yep|yes|hey+|oh|ooh+|woah|whoa|uh+|hmm+|mmm+|ah+|ay+|yo+|ha+|na+|la+|da+|skr|shh|eh|ey)[\s!.,~—\-]*)+$/i
+
+export function isLyricInterjection(text: string): boolean {
+  const t = text.replace(/[（()）\[\]【】]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (t.length === 0 || t.length > 16) return false
+  return INTERJECTION.test(t)
+}
+
+/**
+ * 把解析出来的歌词行分成「歌词」与「歌曲信息」两部分。
+ *
+ * 为什么必须分：平台歌词头部那一串 credits（作词/作曲/编曲/制作人/和声/吉他…）
+ * 通常没有译文，用户在歌词面板里看到的就是「上面一串没有中文、下面才有」——
+ * 实测 Shape of You 的 116 行里有 24 行是这类信息行，
+ * 所谓「只翻译了一半」绝大多数就是它们造成的。
+ *
+ * credits 不再混进歌词流（信息也不丢，单独在界面上展示），
+ * 纯符号行直接丢弃（`·` 这种），拟声行保留在歌词流里由界面淡化处理。
+ */
+export function splitLyricLines(lines: LyricLine[]): { lines: LyricLine[]; info: LyricLine[] } {
+  const kept: LyricLine[] = []
+  const info: LyricLine[] = []
+  for (const line of lines) {
+    if (isLyricMetaLine(line.text)) {
+      info.push(line)
+      continue
+    }
+    if (isLyricNoiseLine(line.text)) continue
+    kept.push(line)
+  }
+  return { lines: kept, info }
 }
 
 /** 解析主歌词 + 译文，一步到位 */
