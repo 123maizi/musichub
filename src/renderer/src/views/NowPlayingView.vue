@@ -137,6 +137,15 @@ const translateTitle = computed(() =>
  */
 const providerLabel = computed(() => {
   if (player.savedEdited) return '已手工修改'
+  /**
+   * 没有译文就**不要挂任何来源标签**。
+   *
+   * 这里原来少了这道判断：savedProvider 为空（大多数没译文的歌都是空）时
+   * 会一路落到最后一行，于是界面上出现「本歌词由 AI 翻译」——
+   * 而页面上根本没有一行译文。实测：随便播一首没有译文的外文歌都会中招。
+   * 用户看到的是一句与事实相反的说明，比不显示标签糟得多。
+   */
+  if (!player.translated) return ''
   const src = player.savedProvider
   if (src === 'manual') return '本歌词由你自己填写'
   if (src === 'official') return '本歌词来自平台官方翻译'
@@ -555,7 +564,7 @@ async function saveCover(): Promise<void> {
 
           <!--
             现成的官方翻译：各平台本来就有译文，直接拿来用，不必自己跑 AI。
-            这些选项是异步收集的，拿不到就不显示这一组 —— 上方「翻译歌词」照旧可用。
+            选项按「能对上主歌词多少行」筛过并排序，对不上的不显示。
           -->
           <template v-if="player.translationOptions.length > 0">
             <span class="trans-pick-label">现成译文</span>
@@ -564,12 +573,30 @@ async function saveCover(): Promise<void> {
               :key="opt.id"
               class="translate-btn"
               :class="{ on: player.activeTranslationId === opt.id }"
-              :title="`用 ${opt.platform} 的官方翻译（不用等 AI，直接可用）`"
+              :title="`用 ${opt.platform} 的现成译文（不用等 AI，直接可用）· 覆盖 ${opt.coverage} 行`"
               @click="player.applyTranslationOption(opt.id)"
             >
               {{ opt.platform }}
             </button>
           </template>
+
+          <!--
+            收集中的状态。
+            这一段是「等了半天没有中文翻译」的直接修法：以前这里什么都不显示，
+            用户分不清是在等、还是根本没有。现在等待与「没找到」都明说，并指路 AI。
+          -->
+          <span v-if="player.translationLoading" class="translate-note faint">正在查找现成译文…</span>
+          <span
+            v-else-if="
+              player.translationEmpty &&
+              player.lyricNeedsTranslation &&
+              !player.translated &&
+              !player.translating
+            "
+            class="translate-note faint"
+          >
+            各平台都没有现成中文译文，点左侧「翻译歌词」可用 AI 翻
+          </span>
 
           <span v-if="player.savedEdited" class="translate-note">已手工修改</span>
           <span v-else-if="providerLabel" class="translate-note">{{ providerLabel }}</span>

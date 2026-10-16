@@ -13,6 +13,7 @@
  */
 import type { Lyric, Song } from '@shared/types/music'
 import { hasVariantMark } from '@shared/purity'
+import { normalizeName } from '@shared/originality'
 import { httpRequest, DEFAULT_UA } from '../net/http'
 
 const QQ_HEADERS = {
@@ -68,6 +69,50 @@ function decodeEntities(text: string): string {
 function buildKeyword(song: Song): string {
   const primarySinger = song.singer.split(/[/、,，]/)[0]?.trim() ?? ''
   return `${song.name} ${primarySinger}`.trim()
+}
+
+/**
+ * 去掉歌名里的括号后缀：「Shape of You(ZzaJ Flip)」→「Shape of You」。
+ *
+ * 为什么需要：用户手上的条目常年是改版名（DJ 版 / 翻奏 / KTV 版 / 某某 Flip），
+ * 而平台上的官方译文几乎只挂在**干净的原名**上。严格匹配（歌名+歌手都要对上）
+ * 在这种条目上必然落空 —— 实测 8 首里有 7 首「现成译文」是空的。
+ */
+function stripBrackets(name: string): string {
+  const out = name
+    .replace(/[（(【[｛{〔〈<「『《][^）)】\]｝}〕〉>」』》]*[）)】\]｝}〕〉>」』》]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return out || name
+}
+
+/** 松散匹配用的归一化歌名（去括号、去符号、繁简归一），与排序那套共用 */
+function looseName(name: string): string {
+  return normalizeName(name)
+}
+
+/**
+ * 松散匹配：**只要求归一化后的歌名相同**，不再要求歌手也一致。
+ *
+ * 为什么歌手必须放开：改版条目的歌手字段是「ZzaJ&Ed Sheeran」这类，
+ * 取第一位歌手会得到「ZzaJ」，而平台上的候选歌手写的是「Ed Sheeran」，
+ * 严格匹配永远对不上。
+ *
+ * 放开歌手是有风险的（可能拿到同名不同歌的译文），所以：
+ *   · 只在严格匹配一个候选都没有时才走这条路
+ *   · 仍然排除带改版标记的候选（伴奏 / Cover / Remix / DJ 版…）
+ *   · 最终还会在渲染层按「这份译文能对上主歌词多少行」再筛一遍 ——
+ *     对不上的选项根本不会出现在界面上
+ */
+function pickLooseSongItem(
+  list: Record<string, unknown>[],
+  targetName: string
+): Record<string, unknown> | undefined {
+  const want = looseName(targetName)
+  if (!want) return undefined
+  const nameOf = (item: Record<string, unknown>): string =>
+    str(item.name ?? item.title ?? item.songname).trim()
+  return list.find((item) => looseName(nameOf(item)) === want && !hasVariantMark(nameOf(item)))
 }
 
 /* ------------------------------------------------------------------ *
@@ -286,13 +331,35 @@ export interface OfficialTranslation {
   tlyric: string
 }
 
+/** 匹配模式：strict = 歌名+歌手都要对上；loose = 只要求归一化歌名一致 */
+type MatchMode = 'strict' | 'loose'
+
+/** 某次查询要用的搜索词与挑选用法（严格 / 松散共用一个实现） */
+function queryFor(song: Song, mode: MatchMode): { keyword: string; use: string } {
+  if (mode === 'loose') {
+    const name = stripBrackets(song.name)
+    const primary = song.singer.split(/[/、,，]/)[0]?.trim() ?? ''
+    return { keyword: `${name} ${primary}`.trim(), use: name }
+  }
+  return { keyword: buildKeyword(song), use: song.name }
+}
+
+function pickFor(
+  list: Record<string, unknown>[],
+  song: Song,
+  mode: MatchMode
+): Record<string, unknown> | undefined {
+  if (mode === 'loose') return pickLooseSongItem(list, stripBrackets(song.name))
+  return pickBestSongItem(list, song.name, song.singer)
+}
+
 /** QQ 的官方翻译：一次请求同时拿到主歌词与翻译，这里只取翻译 */
-async function translationFromQQ(song: Song): Promise<OfficialTranslation | null> {
-  const keyword = buildKeyword(song)
+async function translationFromQQ(song: Song, mode: MatchMode = 'strict'): Promise<OfficialTranslation | null> {
+  const { keyword } = queryFor(song, mode)
   if (!keyword) return null
 
   const searchRes = await httpRequest(
-    `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?p=1&n=3` +
+    `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?p=1&n=${mode === 'loose' ? 10 : 3}` +
       `&w=${encodeURIComponent(keyword)}&format=json&cr=1`,
     {
       method: 'GET',
@@ -301,7 +368,7 @@ async function translationFromQQ(song: Song): Promise<OfficialTranslation | null
     }
   )
   const list = asArr(asObj(asObj(asObj(unwrapJsonp(searchRes.body)).data).song).list)
-  const picked = pickBestSongItem(list, song.name, song.singer)
+  const picked = pickFor(list, song, mode)
   const mid = str(picked?.mid) || str(picked?.songmid)
   if (!mid) return null
 
@@ -317,18 +384,18 @@ async function translationFromQQ(song: Song): Promise<OfficialTranslation | null
 }
 
 /** 网易云的官方翻译（tlyric） */
-async function translationFromNetease(song: Song): Promise<OfficialTranslation | null> {
-  const keyword = buildKeyword(song)
+async function translationFromNetease(song: Song, mode: MatchMode = 'strict'): Promise<OfficialTranslation | null> {
+  const { keyword } = queryFor(song, mode)
   if (!keyword) return null
 
   const searchRes = await httpRequest('https://music.163.com/api/search/get', {
     method: 'POST',
     headers: NETEASE_HEADERS,
-    form: { s: keyword, type: '1', offset: '0', limit: '5' },
+    form: { s: keyword, type: '1', offset: '0', limit: mode === 'loose' ? '10' : '5' },
     timeout: 6000
   })
   const list = asArr(asObj(asObj(asObj(searchRes.body).result).songs))
-  const picked = pickBestSongItem(list, song.name, song.singer)
+  const picked = pickFor(list, song, mode)
   const id = str(picked?.id)
   if (!id) return null
 
@@ -344,14 +411,35 @@ async function translationFromNetease(song: Song): Promise<OfficialTranslation |
 /**
  * 收集所有能拿到的官方翻译。
  *
- * 并发拉取、各自独立失败 —— 一个平台挂了不该影响另一个。
- * 顺序固定（QQ 在前），因为实测 QQ 的翻译质量与覆盖率都更好。
+ * 两轮：
+ *   1. 严格匹配（歌名+歌手+排除改版）—— 结果最可信，优先用
+ *   2. 一个都没有时，用「去掉括号后缀的歌名」再搜一轮，且只要求歌名归一化后一致
+ *
+ * 第二轮是这次「有些歌等半天没有中文翻译」的主要修法：
+ * 实测 8 首歌里 7 首严格匹配落空（条目名是「Shape of You(ZzaJ Flip)」
+ * 「晴天 (KTV版伴奏)」这类），而平台上明明有官方译文。
+ * 宽松匹配拿到的候选最终还要在渲染层按「与主歌词的对齐行数」筛一遍，
+ * 对不上的不会出现在界面上 —— 覆盖率是硬门槛，宁可不给也不给错的。
+ *
+ * 并发拉取、各自独立失败；顺序固定（QQ 在前），实测 QQ 覆盖率更好。
  */
 export async function fetchOfficialTranslations(song: Song): Promise<OfficialTranslation[]> {
-  const settled = await Promise.allSettled([translationFromQQ(song), translationFromNetease(song)])
-  const out: OfficialTranslation[] = []
-  for (const r of settled) {
-    if (r.status === 'fulfilled' && r.value) out.push(r.value)
+  const collect = async (mode: MatchMode): Promise<OfficialTranslation[]> => {
+    const settled = await Promise.allSettled([
+      translationFromQQ(song, mode),
+      translationFromNetease(song, mode)
+    ])
+    const out: OfficialTranslation[] = []
+    for (const r of settled) {
+      if (r.status === 'fulfilled' && r.value) out.push(r.value)
+    }
+    return out
   }
-  return out
+
+  const strict = await collect('strict')
+  if (strict.length > 0) return strict
+
+  // 歌名里没有括号后缀 → 第二轮搜的词与第一轮一样，没必要再打两次请求
+  if (stripBrackets(song.name) === song.name.trim()) return strict
+  return collect('loose')
 }

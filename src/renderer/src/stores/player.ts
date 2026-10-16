@@ -7,7 +7,13 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Lyric, MusicUrlResult, Quality, Song } from '@shared/types/music'
-import { cleanIpcError, findLyricIndex, parseLrcWithTranslation, type LyricLine } from '../utils/format'
+import {
+  cleanIpcError,
+  findLyricIndex,
+  parseLrcWithTranslation,
+  translationCoverage,
+  type LyricLine
+} from '../utils/format'
 import {
   deleteSavedTranslation,
   getLyric as fetchLyric,
@@ -234,6 +240,24 @@ export const usePlayerStore = defineStore('player', () => {
   const hasTranslation = computed(() =>
     showTranslation.value && lyricLines.value.some((line) => !!line.trans)
   )
+
+  /**
+   * 这首歌**需不需要**中文译文。
+   *
+   * 用来决定「各平台都没有现成中文译文」这句提示要不要显示 ——
+   * 中文歌的歌词本来就是中文，再提示「没有中文译文」纯属噪音，
+   * 而且会让「没找到译文」这件事看起来像 bug。
+   * 判据是汉字占比：英文/日文歌接近 0，中文歌接近 1，阈值取 0.3 很宽松。
+   */
+  const lyricNeedsTranslation = computed(() => {
+    const text = lyricLines.value
+      .map((line) => line.text)
+      .join('')
+      .trim()
+    if (!text) return false
+    const cjk = text.match(/[\u4e00-\u9fff]/g)?.length ?? 0
+    return cjk / text.length < 0.3
+  })
 
   /* ------------------------------ 试听片段检测 ------------------------------ */
 
@@ -992,10 +1016,21 @@ export const usePlayerStore = defineStore('player', () => {
 
   /** 各平台「本来就翻好的」译文（QQ / 网易云…），拿不到就是空数组 */
   const translationOptions = ref<
-    Array<{ id: string; label: string; platform: string; tlyric: string }>
+    Array<{ id: string; label: string; platform: string; tlyric: string; coverage: number }>
   >([])
   /** 当前正在用的那一份（'' = 没译文，用 AI 时由既有流程改 savedProvider） */
   const activeTranslationId = ref('')
+
+  /**
+   * 「正在找现成译文」与「没找到」两个状态。
+   *
+   * 为什么必须有：收集过程是异步的（要打平台接口，实测 200~700ms，
+   * 走宽松匹配时还要再来一轮），而界面此前**完全没有反馈** ——
+   * 用户看到的就是「等了半天没有中文翻译」，不知道是在等、还是没有。
+   * 现在等待时明说在找，找不到时明说没有并指路 AI 翻译。
+   */
+  const translationLoading = ref(false)
+  const translationEmpty = ref(false)
 
   /**
    * 应用某一份官方翻译；传空串表示关闭译文、回到原文。
@@ -1027,22 +1062,44 @@ export const usePlayerStore = defineStore('player', () => {
    * 收集官方翻译选项。
    *
    * 与 AI 翻译是互补关系：这里拿的是平台**现成**的译文，不用等模型、不消耗算力，
-   * 而且官方译文质量通常更好。所以**拿到就自动用第一份**（QQ 优先），
+   * 而且官方译文质量通常更好。所以**拿到就自动用覆盖最好的那份**，
    * 用户什么都不用做就有译文；不满意再在界面上换成别的平台，或改用 AI。
    *
-   * 自动应用的条件很克制：只在「当前还没有译文、且用户没手工编辑过」时生效 ——
+   * 两道筛选（都是这次「等了半天没有中文翻译」的修法）：
+   *   1. 覆盖率门槛：先用 translationCoverage 量「这份译文能对上主歌词几行」，
+   *      0 行的选项直接不显示 —— 点了也是空白，不如不给
+   *   2. 按覆盖率排序：自动应用的是最合适的那份，而不是碰巧先返回的那份
+   *
+   * 自动应用的条件仍然克制：只在「当前还没有译文、且用户没手工编辑过」时生效 ——
    * 绝不覆盖用户已有的选择。
    */
   async function loadTranslationOptions(song: Song): Promise<void> {
+    if (translationLoading.value) return
+    translationLoading.value = true
+    translationEmpty.value = false
     try {
       const list = await window.api.player.getLyricTranslations(song)
       if (current.value?.id !== song.id) return
-      translationOptions.value = Array.isArray(list) ? list : []
-      if (translationOptions.value.length > 0 && !translated.value && !savedEdited.value) {
-        applyTranslationOption(translationOptions.value[0].id)
+
+      const main = lyricRaw.value?.lyric || lyricRaw.value?.lxlyric || ''
+      const scored = (Array.isArray(list) ? list : [])
+        .map((opt) => ({ ...opt, coverage: translationCoverage(main, opt.tlyric) }))
+        .filter((opt) => opt.coverage > 0)
+        .sort((a, b) => b.coverage - a.coverage)
+
+      translationOptions.value = scored
+      if (scored.length === 0) {
+        translationEmpty.value = true
+        return
+      }
+      if (!translated.value && !savedEdited.value) {
+        applyTranslationOption(scored[0].id)
       }
     } catch {
       /* 拿不到就算了：界面照旧提供 AI 翻译，不影响任何既有流程 */
+      translationEmpty.value = true
+    } finally {
+      translationLoading.value = false
     }
   }
 
@@ -1538,6 +1595,8 @@ export const usePlayerStore = defineStore('player', () => {
     // 现成的官方翻译（多平台可选）
     translationOptions,
     activeTranslationId,
+    translationLoading,
+    translationEmpty,
     applyTranslationOption,
     // 预热：悬停即开始解析，点击几乎 0 等待
     prefetchSong,
@@ -1548,6 +1607,7 @@ export const usePlayerStore = defineStore('player', () => {
     progress,
     currentLyricIndex,
     hasLyric,
+    lyricNeedsTranslation,
     hasTranslation,
     // 动作
     play,
