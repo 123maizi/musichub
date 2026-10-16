@@ -15,6 +15,8 @@ import {
   type SearchEmptySource,
   type UiPreferences
 } from '@shared/types/preferences'
+import { QUALITY_ORDER } from '@shared/constants'
+import type { Quality } from '@shared/types/music'
 import { JsonStore } from './store'
 
 export class PreferencesStore {
@@ -34,7 +36,14 @@ export class PreferencesStore {
     const raw = this.store.get()
     return {
       searchEmptySource: normalizeSearchEmptySource(raw?.searchEmptySource),
-      searchHistory: this.normalizeHistory(raw?.searchHistory)
+      searchHistory: this.normalizeHistory(raw?.searchHistory),
+      /**
+       * ⚠️ 新增字段必须同时出现在 get 和 set 里。
+       * 这里漏掉 playQuality 的读，出现过一个很难查的现象：
+       * 值确实写进了 JSON 文件，但渲染层 `prefs.get()` 永远读回 undefined，
+       * 于是「选了音质、重启又变回默认」——落盘成功却等于没存。
+       */
+      playQuality: normalizeQuality(raw?.playQuality)
     }
   }
 
@@ -46,6 +55,9 @@ export class PreferencesStore {
     }
     if (patch.searchHistory !== undefined) {
       next.searchHistory = this.normalizeHistory(patch.searchHistory)
+    }
+    if (patch.playQuality !== undefined) {
+      next.playQuality = normalizeQuality(patch.playQuality)
     }
     this.store.set(next)
     return next
@@ -120,6 +132,12 @@ export class PreferencesStore {
 function normalizeKeyword(value: unknown): string {
   if (typeof value !== 'string') return ''
   return value.replace(/\s+/g, ' ').trim().slice(0, SEARCH_HISTORY_MAX_LEN)
+}
+
+/** 音质取值收敛：只认契约里列出的那几档，其余一律当没设过（用默认值） */
+function normalizeQuality(value: unknown): Quality | undefined {
+  if (typeof value !== 'string') return undefined
+  return (QUALITY_ORDER as readonly string[]).includes(value) ? (value as Quality) : undefined
 }
 
 export type { SearchEmptySource }

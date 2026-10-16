@@ -293,21 +293,47 @@ async function fetchFromNetease(song: Song): Promise<Lyric | null> {
  * 取歌词。
  *
  * 歌词失败绝不该影响播放，所以全程吞异常，最差就是返回 null。
- * 两个源依次尝试：QQ 优先（稳、质量高），失败再退网易云。
+ *
+ * ⚠️ 两个源**并发**，谁先给出非空歌词就用谁。
+ * 旧实现是「QQ 试完再试网易云」的串行写法：QQ 那条一旦慢（实测最坏几秒），
+ * 用户就要干等两倍时间才看到歌词，表现出来就是「卡好久，像没歌词」。
+ * 顺序上的偏好（QQ 质量更好）不值得用一倍等待去换 —— 两边都是完整 LRC，
+ * 而 pickBestSongItem 已经挡住了「把翻唱的歌词挂到原唱头上」这类质量问题。
  */
 export async function fetchBuiltinLyric(song: Song): Promise<Lyric | null> {
-  try {
-    const byQQ = await fetchFromQQ(song)
-    if (byQQ) return byQQ
-  } catch {
-    /* 换下一个源 */
-  }
+  const tasks = [
+    fetchFromQQ(song).catch(() => null),
+    fetchFromNetease(song).catch(() => null)
+  ]
+  return firstNonEmpty(tasks)
+}
 
-  try {
-    return await fetchFromNetease(song)
-  } catch {
-    return null
-  }
+/** 谁先给出非空结果就用谁；全空才是真的没有 */
+function firstNonEmpty<T>(tasks: Array<Promise<T | null>>): Promise<T | null> {
+  return new Promise((resolve) => {
+    let pending = tasks.length
+    let settled = false
+    if (pending === 0) {
+      resolve(null)
+      return
+    }
+    for (const task of tasks) {
+      const done = (value: T | null): void => {
+        if (settled) return
+        if (value) {
+          settled = true
+          resolve(value)
+          return
+        }
+        pending -= 1
+        if (pending === 0) {
+          settled = true
+          resolve(null)
+        }
+      }
+      task.then(done).catch(() => done(null))
+    }
+  })
 }
 
 /* ------------------------------------------------------------------ *

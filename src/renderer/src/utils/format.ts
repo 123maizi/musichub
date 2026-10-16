@@ -178,6 +178,22 @@ export function mergeTranslation(lines: LyricLine[], tlyric?: string): LyricLine
   )
 }
 
+/**
+ * 这一行是不是「歌词信息行」（作词 / 作曲 / 制作人 …）而不是歌词本身。
+ *
+ * 为什么需要：平台歌词头部常带一串 credits（实测 Shape of You 有 116 行，
+ * 其中 24 行没有译文，**大部分是这类信息行**）。自动补齐如果连着它们一起翻，
+ * 就变成「为了翻『作词 : Ed Sheeran』等十秒网络往返」——
+ * 既慢又没意义，用户要的是歌词有中文。
+ * 判定只看行首的角色词，宁少不多：判错顶多是多补一行。
+ */
+const META_ROLE =
+  /^\s*(作词|作曲|编曲|制作人|出品|监制|混音|母带|录音|配唱|和声|主人声|人声|吉他|贝斯|鼓|键盘|弦乐|钢琴|词|曲|OP|SP|Producer|Writer|Composer|Arranger|Lyricist|Mixed|Mastered|Recorded|Sample|Label|Vocals?|Guitar|Bass|Drums|Piano|Strings)\b/i
+
+export function isLyricMetaLine(text: string): boolean {
+  return META_ROLE.test(text)
+}
+
 /** 解析主歌词 + 译文，一步到位 */
 export function parseLrcWithTranslation(lrc: string, tlyric?: string): LyricLine[] {
   return mergeTranslation(parseLrc(lrc), tlyric)

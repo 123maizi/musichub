@@ -586,6 +586,9 @@ async function saveCover(): Promise<void> {
             用户分不清是在等、还是根本没有。现在等待与「没找到」都明说，并指路 AI。
           -->
           <span v-if="player.translationLoading" class="translate-note faint">正在查找现成译文…</span>
+          <span v-else-if="player.fillingTranslation" class="translate-note faint">
+            正在用 AI 补齐剩余几行译文…
+          </span>
           <span
             v-else-if="
               player.translationEmpty &&

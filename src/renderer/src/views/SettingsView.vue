@@ -7,16 +7,13 @@ import {
   type SearchEmptySource,
   type UiPreferences
 } from '@shared/types/preferences'
-import { QUALITY_META, QUALITY_ORDER } from '@shared/constants'
 import DownloadFormatPicker from '../components/DownloadFormatPicker.vue'
 import { useDownloadStore } from '../stores/downloads'
-import { usePlayerStore } from '../stores/player'
 import { useSourceStore } from '../stores/sources'
 import { cleanIpcError } from '../utils/format'
 import { getAiConfig, setAiConfig, testAi } from '../utils/ipc'
 
 const downloads = useDownloadStore()
-const player = usePlayerStore()
 const sources = useSourceStore()
 
 const info = ref<AppInfo | null>(null)
@@ -575,25 +572,13 @@ async function runAiTest(): Promise<void> {
         </div>
       </div>
 
-      <!-- ------------------------------ 播放 ------------------------------ -->
-      <div class="group">
-        <div class="group-title">播放</div>
-
-        <div class="field">
-          <label>默认播放音质</label>
-          <div class="control col gap-4">
-            <select
-              :value="player.quality"
-              @change="player.setQuality(($event.target as HTMLSelectElement).value as never)"
-            >
-              <option v-for="q in QUALITY_ORDER" :key="q" :value="q">
-                {{ QUALITY_META[q]?.name }}（{{ QUALITY_META[q]?.short }}）
-              </option>
-            </select>
-            <span class="faint note">切换后当前歌曲会立即按新音质重新取流。</span>
-          </div>
-        </div>
-      </div>
+      <!--
+        「播放」这一组原先只有「默认播放音质」一项，已删除。
+        删除的理由不是简化界面，而是它和播放条上的音质快选**互相打脸**：
+        用户在播放条上选了无损，下一首歌又被这里的「默认值」改回去，
+        看起来像音质选择不生效。现在唯一来源是播放条上的快选，选择会一直记住
+        （落盘在 prefs.playQuality）；音源没有该音质时由取流链路自动降级。
+      -->
 
       <!-- ------------------------------ 音源概览 ------------------------------ -->
       <div class="group">

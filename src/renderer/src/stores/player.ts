@@ -7,10 +7,14 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Lyric, MusicUrlResult, Quality, Song } from '@shared/types/music'
+import { QUALITY_ORDER } from '@shared/constants'
 import {
   cleanIpcError,
   findLyricIndex,
+  mergeTranslation,
+  parseLrc,
   parseLrcWithTranslation,
+  isLyricMetaLine,
   translationCoverage,
   type LyricLine
 } from '../utils/format'
@@ -49,6 +53,21 @@ export const usePlayerStore = defineStore('player', () => {
   const volume = ref(0.8)
 
   const quality = ref<Quality>('320k')
+
+  /**
+   * 启动时读回上次选的音质。
+   *
+   * 「设置 → 默认播放音质」已删除，播放条上的选择成为唯一来源；
+   * 不落盘的话重启后又回到 320k，用户会以为选择没生效。
+   * 读不到就保持默认，静默失败。
+   */
+  void window.api.prefs
+    .get()
+    .then((prefs) => {
+      const saved = prefs?.playQuality
+      if (saved && QUALITY_ORDER.includes(saved as Quality)) quality.value = saved as Quality
+    })
+    .catch(() => undefined)
   const mode = ref<PlayMode>('order')
   /** 本次播放实际命中的音源（UI 上展示，让用户知道歌是从哪来的） */
   const urlInfo = ref<MusicUrlResult | null>(null)
@@ -1031,6 +1050,12 @@ export const usePlayerStore = defineStore('player', () => {
    */
   const translationLoading = ref(false)
   const translationEmpty = ref(false)
+  /** 正在为哪首歌取译文（用于「同一首歌别重复请求」，同时保证不挡住别的歌） */
+  let translationFetchFor = ''
+  /** 等待现成译文的上限；到点就停止等待，界面不再挂着「正在查找…」 */
+  const TRANSLATION_WAIT_MS = 9000
+  /** 自动应用一份现成译文所需的最少覆盖行数（避免几行巧合顶掉用户已有的译文） */
+  const MIN_TRANSLATION_LINES = 4
 
   /**
    * 应用某一份官方翻译；传空串表示关闭译文、回到原文。
@@ -1074,17 +1099,52 @@ export const usePlayerStore = defineStore('player', () => {
    * 绝不覆盖用户已有的选择。
    */
   async function loadTranslationOptions(song: Song): Promise<void> {
-    if (translationLoading.value) return
+    /**
+     * 同一首歌重复调用才跳过 —— **绝不能因为别的歌在取就丢掉这一首**。
+     *
+     * 我在 1.4.9 里写过 `if (translationLoading.value) return`，本意是防重复请求，
+     * 实际效果是：A 歌的译文还在路上时切到 B 歌，**B 的请求被整段丢掉**，
+     * B 永远拿不到译文 —— 用户报的「很多本来有一半中文歌词的歌，现在全没译文了」。
+     * 宽松匹配那一轮会把请求拉长到几秒，窗口被显著放大。
+     */
+    if (translationFetchFor === song.id) return
+    translationFetchFor = song.id
     translationLoading.value = true
     translationEmpty.value = false
+
+    /**
+     * 硬超时。
+     *
+     * 主进程那条链路最多要打 4 次网络请求，任何一次挂住都会让这个 Promise
+     * 一直不落地；没有超时的话界面就永远停在「正在查找现成译文…」，
+     * 后面的歌也一起被卡住（旧写法正是靠这个标志做互斥）。
+     * 超时只是**停止等待**，不取消请求 —— 拿到了照样会用上。
+     */
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      if (translationFetchFor === song.id) {
+        translationLoading.value = false
+        translationEmpty.value = true
+      }
+    }, TRANSLATION_WAIT_MS)
+
     try {
       const list = await window.api.player.getLyricTranslations(song)
       if (current.value?.id !== song.id) return
 
       const main = lyricRaw.value?.lyric || lyricRaw.value?.lxlyric || ''
+      const mainLines = parseLrc(main).filter((line) => line.text).length
       const scored = (Array.isArray(list) ? list : [])
         .map((opt) => ({ ...opt, coverage: translationCoverage(main, opt.tlyric) }))
-        .filter((opt) => opt.coverage > 0)
+        /**
+         * 覆盖率门槛 + 最低门槛。
+         *
+         * 0 行的选项点了也是空白，不该出现在界面上；
+         * 而 1~2 行的「沾边」结果同样不该**自动**顶掉用户已有的译文 ——
+         * 宽松匹配会搜到同名不同歌的条目，靠几行巧合过关正是最坏的情况。
+         */
+        .filter((opt) => opt.coverage >= Math.max(MIN_TRANSLATION_LINES, Math.floor(mainLines * 0.15)))
         .sort((a, b) => b.coverage - a.coverage)
 
       translationOptions.value = scored
@@ -1092,19 +1152,46 @@ export const usePlayerStore = defineStore('player', () => {
         translationEmpty.value = true
         return
       }
-      if (!translated.value && !savedEdited.value) {
+
+      /**
+       * 自动应用，但**不许把现有的译文换差**。
+       *
+       * 用户可能已经有一份 AI 译文（覆盖一半也算），或手工改过。
+       * 旧逻辑只看「当前有没有译文」，于是一份 3 行的宽松匹配结果
+       * 就能把用户那半份译文顶掉 —— 这正是用户报的「全都没有中文翻译了」。
+       * 现在只在「新的更全」时才替换。
+       */
+      const currentCoverage = translated.value
+        ? lyricLines.value.filter((line) => !!line.trans).length
+        : 0
+      if (savedEdited.value) return
+      if (scored[0].coverage > currentCoverage) {
         applyTranslationOption(scored[0].id)
       }
     } catch {
       /* 拿不到就算了：界面照旧提供 AI 翻译，不影响任何既有流程 */
       translationEmpty.value = true
     } finally {
-      translationLoading.value = false
+      clearTimeout(timer)
+      if (translationFetchFor === song.id && !timedOut) translationLoading.value = false
+      /**
+       * 补齐/整首翻译统一在这里触发 —— 这是「译文这件事已经尘埃落定」的唯一时刻。
+       *
+       * 之前分别挂在 loadLyric 和 applyTranslationOption 上，结果是两次触发互相打架：
+       * 平台自带译文先触发一次补齐（要好几秒），随后官方译文到达又触发一次，
+       * 第二次被「正在补齐」的互斥挡掉 —— 最终留下的是官方那份**没翻全**的译文，
+       * 用户看到的还是一半。实测 Shape of You 135 行里 50 行没译文就是这个原因。
+       */
+      if (current.value?.id === song.id) void ensureCompleteTranslation()
     }
   }
 
   /** 取歌词 */
   async function loadLyric(song: Song): Promise<void> {
+    /** 换歌就允许重新取译文：上一首可能失败/超时过，别让那条记录挡住这一首 */
+    translationFetchFor = ''
+    translationOptions.value = []
+    translationEmpty.value = false
     try {
       const lyric = await fetchLyric(song)
       if (!lyric || current.value?.id !== song.id) return
@@ -1143,6 +1230,7 @@ export const usePlayerStore = defineStore('player', () => {
        * 放在最后：它只是「锦上添花」，慢一点、失败都不该影响歌词本身已经显示出来。
        */
       void loadTranslationOptions(song)
+
     } catch {
       // 已经切歌了就别动界面上的歌词：这次失败属于上一首
       if (current.value?.id !== song.id) return
@@ -1336,6 +1424,162 @@ export const usePlayerStore = defineStore('player', () => {
     editLines.value = []
   }
 
+  /**
+   * 补齐缺失的译文行。
+   *
+   * 用户的原话是「只获得一半中文歌词，要完全获得中文翻译」，而残留缺口的原因
+   * 是**平台那份现成译文本身就没翻全**（实测：Lemon 43/57、LOSER 38/85、
+   * Yellow 40/54、Shape of You 88/92）—— 副歌、重复段、念白常常没有官方译文。
+   * 这种情况再怎么对齐也补不出来，只能自己翻。
+   *
+   * 做法上刻意克制：
+   *   · **只把缺译文的那几行**交给模型（不是整首重翻）—— 省 token、也快
+   *   · 已有译文一律原样保留，模型只填空白；对不上就留空，不覆盖
+   *   · 只在「本来就已经有译文」时自动补 —— 整首都没有译文的歌仍然由用户点「翻译歌词」
+   *   · 中文歌不补（歌词本来就是中文）
+   *   · 同一首歌本次运行只补一次（结果留在内存里，重复播不再花钱）
+   * 失败静默：官方译文照旧显示，绝不因为补齐失败而把已有译文弄丢。
+   */
+  const fillingTranslation = ref(false)
+  /**
+   * 补齐结果缓存：歌曲 id → 补齐后的完整译文 LRC。
+   *
+   * ⚠️ 存的是**结果**，不是「补过了」这个标记。我第一版存的是标记，
+   * 于是出现一个很难看的回归：同一首歌重播时歌词会先按官方那份**没翻全**的译文
+   * 重建，而标记说「已经补过了」→ 不再补 → 用户看到又变回一半。
+   * 存结果就没这个问题：重播直接套缓存，既不重复花钱，也不会掉行。
+   */
+  const filledResults = new Map<string, string>()
+  /** 用户主动清掉过译文的歌：不再自动补，也不再自动翻 */
+  const userCleared = new Set<string>()
+  /** 已经自动翻过整首的歌（同一首歌本次运行不重复花钱） */
+  const autoTranslatedSongs = new Set<string>()
+
+  /** 把当前译文行序列化回 LRC（时间戳取自原文行，所以贴回去是精确匹配） */
+  function serializeTranslation(lines: LyricLine[]): string {
+    return lines
+      .filter((line) => line.text && line.trans)
+      .map((line) => `${toLrcTime(line.time)}${line.trans}`)
+      .join('\n')
+  }
+
+  /** 把一份完整译文套到当前歌词上，已有译文原样保留 */
+  function applyMergedTranslation(tlyric: string): boolean {
+    if (!tlyric.trim()) return false
+    const before = lyricLines.value.map((line) => line.trans)
+    const merged = mergeTranslation(lyricLines.value, tlyric)
+    lyricLines.value = merged.map((line, index) =>
+      before[index] ? { ...line, trans: before[index] } : line
+    )
+    const has = lyricLines.value.some((line) => !!line.trans)
+    if (has) {
+      translated.value = true
+      translatedSongId.value = current.value?.id ?? ''
+    }
+    return has
+  }
+
+  /**
+   * 保证这首歌「有完整的译文」。
+   *
+   * 用户要求「要完全获得中文翻译」，而缺口有两种：
+   *   1. 有一份现成译文但没翻全（平台侧就缺）→ 只补缺的那几行，省 token
+   *   2. 一个字都没有 → 整首翻一遍（AI 或内置接口，走既有的翻译链路）
+   * 两种都是**自动**做的：让用户自己发现「这里少了一半」再去点按钮，
+   * 等于把工作推给他。自动路径只在这些前提下启用，避免打扰：
+   *   · 用户没有主动清过这首歌的译文
+   *   · 中文歌不整首翻（本来就不需要中文译文）
+   *   · 同一首歌本次运行只做一次
+   * 失败一律静默（自动行为不该弹错误），已有译文任何情况下都不会被弄丢。
+   */
+  async function ensureCompleteTranslation(): Promise<void> {
+    const song = current.value
+    if (!song) return
+    if (userCleared.has(song.id)) return
+
+    // 重播：直接套上次补齐的结果，不再打接口
+    const cached = filledResults.get(song.id)
+    if (cached) {
+      applyMergedTranslation(cached)
+      return
+    }
+
+    if (!translated.value) {
+      if (!lyricNeedsTranslation.value) return
+      if (autoTranslatedSongs.has(song.id) || translating.value) return
+      autoTranslatedSongs.add(song.id)
+      const ok = await translateCurrentLyric()
+      // 自动触发失败时不要把报错留在界面上：用户没点过任何按钮
+      if (!ok) translateError.value = ''
+      return
+    }
+
+    await fillMissingTranslations()
+  }
+
+  async function fillMissingTranslations(): Promise<void> {
+    const song = current.value
+    if (!song || fillingTranslation.value) return
+    if (filledResults.has(song.id)) {
+      applyMergedTranslation(filledResults.get(song.id) ?? '')
+      return
+    }
+    if (!lyricNeedsTranslation.value) return
+
+    /**
+     * 只补「真正的歌词行」。
+     *
+     * 平台歌词头部那一串 credits（作词/作曲/制作人…）通常也没有译文，
+     * 但它们**不需要中文**，而且一补就是秒级的网络往返（实测 18 行 9.9 秒）。
+     * 把这类行排除之后，剩下要补的往往只有几行，既快又准。
+     */
+    const missing = lyricLines.value.filter(
+      (line) => line.text && !line.trans && !isLyricMetaLine(line.text)
+    )
+    if (missing.length === 0) return
+    // 整首都没有基准译文时不在这里补（那条路走 ensureCompleteTranslation 的整首翻译分支）
+    if (missing.length > 80) return
+
+    fillingTranslation.value = true
+    try {
+      /**
+       * 分批翻。
+       *
+       * 一次把几十行丢给接口有两个问题：单次长度有限制（超了整批白跑，
+       * 公共接口尤其明显），而且中途失败一行都留不下。
+       * 分批之后每批成功就立刻并进去 —— 用户能看到译文一行行补上，
+       * 失败也只是少那几行，不会把已有译文弄丢。
+       */
+      const BATCH = 18
+      for (let i = 0; i < missing.length; i += BATCH) {
+        if (current.value?.id !== song.id) return
+        const batch = missing.slice(i, i + BATCH)
+        const sub: Lyric = {
+          lyric: batch.map((line) => `${toLrcTime(line.time)}${line.text}`).join('\n'),
+          sourceId: 'gap-fill'
+        }
+        const result = await translateLyric(sub, undefined, song)
+        if (current.value?.id !== song.id) return
+        const tlyric = result?.lyric?.tlyric ?? ''
+        if (!tlyric.trim()) continue
+
+        /**
+         * 合并时把「已有译文」钉死：模型只允许填空。
+         * mergeTranslation 按时间戳最近邻贴回，个别行可能落到已经有译文的行上，
+         * 那种情况一律保留原译文（用户可能手工改过，官方译文也不该被机器顶掉）。
+         */
+        applyMergedTranslation(tlyric)
+      }
+
+      // 把补齐后的完整译文缓存下来：重播这首歌直接套，不再打接口、也不会掉回一半
+      filledResults.set(song.id, serializeTranslation(lyricLines.value))
+    } catch {
+      /* 补齐失败不影响任何既有译文 */
+    } finally {
+      fillingTranslation.value = false
+    }
+  }
+
   /** 秒 → LRC 时间戳 [mm:ss.xx] */
   function toLrcTime(seconds: number): string {
     const safe = Math.max(0, seconds)
@@ -1408,6 +1652,12 @@ export const usePlayerStore = defineStore('player', () => {
   async function clearTranslation(): Promise<void> {
     const song = current.value
     if (!song) return
+    /**
+     * 记下「这首歌是用户自己要求清掉的」。
+     * 自动补齐/自动翻译必须尊重这个意图，否则清完一转眼又被补回来，
+     * 用户会认为清除按钮坏了。
+     */
+    userCleared.add(song.id)
     await deleteSavedTranslation(song.id)
     // 删除期间换歌了：别把上一首的歌词状态写到新歌界面上
     if (current.value?.id !== song.id) return
@@ -1489,6 +1739,15 @@ export const usePlayerStore = defineStore('player', () => {
   /** 切换音质：换的是流，不是播放位置 */
   async function setQuality(next: Quality): Promise<void> {
     quality.value = next
+    /**
+     * 记住这个选择。
+     *
+     * 用户报的「选完音质，听别的歌又自动切回默认音质」根因就是没记住：
+     * 这里只改了内存里的值，而设置页那份「默认播放音质」才是下一首歌读的东西。
+     * 现在设置页那一项已删除，播放条上的选择就是唯一来源，并且落盘。
+     * 音源没有该音质时由取流链路自动降级成它能给的最好的（既有行为）。
+     */
+    void window.api.prefs.set({ playQuality: next }).catch(() => undefined)
     const song = current.value
     if (!song) return
     /**
@@ -1597,6 +1856,7 @@ export const usePlayerStore = defineStore('player', () => {
     activeTranslationId,
     translationLoading,
     translationEmpty,
+    fillingTranslation,
     applyTranslationOption,
     // 预热：悬停即开始解析，点击几乎 0 等待
     prefetchSong,

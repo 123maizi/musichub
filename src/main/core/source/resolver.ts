@@ -380,37 +380,52 @@ export class MusicResolver {
       this.supportsAction(src, song.platform, 'lyric')
     )
 
-    for (const src of candidates) {
-      const started = Date.now()
-      try {
-        const raw = await this.dispatch(src, 'lyric', song, '128k')
-        const lyric = this.normalizeLyric(raw)
-        if (lyric && (lyric.lyric || lyric.tlyric)) {
-          this.deps.sources.recordStat(src.id, true, Date.now() - started)
-          return { ...lyric, sourceId: src.id }
+    /**
+     * 音源链与内置链**同时开跑，谁先给出非空歌词就用谁**。
+     *
+     * 用户报的「一直卡好久才显示歌词，让人误以为没有歌词」根因就在这里：
+     * 旧实现是「音源链逐个试完 → 再走内置」，两段**串行**加起来最长十几秒
+     * （实测某首歌 13.2 秒才出现第一行歌词）。而这两条链本来就是互相独立的备选，
+     * 没有任何理由排队。
+     *
+     * 注意不是简单的 Promise.race：两边都可能返回 null（没歌词），
+     * 只认「非空」才算赢 —— 否则先返回的那个 null 会把还在跑的好结果一起废掉。
+     */
+    const bySource = (async (): Promise<Lyric | null> => {
+      for (const src of candidates) {
+        const started = Date.now()
+        try {
+          const raw = await this.dispatch(src, 'lyric', song, '128k')
+          const lyric = this.normalizeLyric(raw)
+          if (lyric && (lyric.lyric || lyric.tlyric)) {
+            this.deps.sources.recordStat(src.id, true, Date.now() - started)
+            return { ...lyric, sourceId: src.id }
+          }
+          this.deps.sources.recordStat(src.id, false, Date.now() - started, '歌词为空')
+        } catch (err) {
+          const msg = errorMessage(err)
+          this.deps.sources.recordStat(src.id, false, Date.now() - started, msg)
+          this.deps.onLog?.('warn', 'resolver', `歌词获取失败 ${src.info.name}: ${msg}`)
         }
-        this.deps.sources.recordStat(src.id, false, Date.now() - started, '歌词为空')
-      } catch (err) {
-        const msg = errorMessage(err)
-        this.deps.sources.recordStat(src.id, false, Date.now() - started, msg)
-        this.deps.onLog?.('warn', 'resolver', `歌词获取失败 ${src.info.name}: ${msg}`)
       }
-    }
+      return null
+    })()
 
     /**
-     * 音源都拿不到时，退回内置歌词服务。
+     * 内置歌词服务。
      *
      * 这里纠正了一个错误假设：歌词**不该依赖音源**。
      * 实测声明支持歌词的音源（酷我那两个）接口早已失效，
      * 于是「有歌可听」被「音源还愿意给歌词」绑架了 —— 而歌词本是跨平台通用的。
      */
-    const builtin = await fetchBuiltinLyric(song)
-    if (builtin) {
-      this.deps.onLog?.('info', 'resolver', `歌词取自内置服务: ${song.name}`)
-      return builtin
-    }
+    const byBuiltin = fetchBuiltinLyric(song)
+      .then((lyric) => {
+        if (lyric) this.deps.onLog?.('info', 'resolver', `歌词取自内置服务: ${song.name}`)
+        return lyric
+      })
+      .catch(() => null)
 
-    return null
+    return firstNonEmpty([bySource, byBuiltin])
   }
 
   /* ------------------------------ 候选与音质 ------------------------------ */
@@ -776,6 +791,41 @@ export function toMusicInfo(song: Song): Record<string, unknown> {
  * 例如 Python 风格的 `None?from=xxx_api`：它非空、看起来像成功，
  * 一直传到播放器才炸，用户看到的却是播放器在报错。
  */
+/**
+ * 谁先给出**非空**结果就用谁。
+ *
+ * 与 Promise.race 的区别很关键：race 认「先落地的」，而这里两条链都可能
+ * 正当地返回 null（这首歌没有歌词）。若按 race，先返回的 null 会把
+ * 另一条还在跑、其实有歌词的链一起废掉 —— 那正是「有时候就是没有歌词」的来源。
+ * 只有全部返回空时，才认定真的没有。
+ */
+function firstNonEmpty<T>(tasks: Array<Promise<T | null>>): Promise<T | null> {
+  return new Promise((resolve) => {
+    let pending = tasks.length
+    let settled = false
+    if (pending === 0) {
+      resolve(null)
+      return
+    }
+    for (const task of tasks) {
+      const done = (value: T | null): void => {
+        if (settled) return
+        if (value) {
+          settled = true
+          resolve(value)
+          return
+        }
+        pending -= 1
+        if (pending === 0) {
+          settled = true
+          resolve(null)
+        }
+      }
+      task.then(done).catch(() => done(null))
+    }
+  })
+}
+
 function isPlayableUrl(url: string): boolean {
   if (!url) return false
   if (/^https?:\/\//i.test(url)) return true

@@ -10,11 +10,23 @@
 /** 搜索页空态（还没输入关键词时）显示哪一类歌曲 */
 export type SearchEmptySource = 'history' | 'favorites' | 'playlist'
 
+import type { Quality } from './music'
+
 export interface UiPreferences {
   /** 搜索页空态显示：历史播放（默认）/ 我的喜欢 / 歌单歌曲 */
   searchEmptySource: SearchEmptySource
   /** 搜索历史：去重、最新在前、最多 SEARCH_HISTORY_LIMIT 条 */
   searchHistory: string[]
+  /**
+   * 播放音质偏好。
+   *
+   * 这个字段替代了「设置 → 默认播放音质」那一项：
+   * 用户既然能在播放条上直接选音质，就没有必要再去设置页选「默认」——
+   * 而两者并存时反而互相打脸：播放条选完，下一首歌又按设置里的默认值走。
+   * 现在只有一个来源：**在播放条上选的音质就是默认音质**，会一直记住。
+   * 音源没有该音质时由取流链路自动降级（既有行为，不变）。
+   */
+  playQuality?: Quality
 }
 
 /** 搜索历史最多保留多少条（硬上限） */
