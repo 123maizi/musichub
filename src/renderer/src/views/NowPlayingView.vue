@@ -15,6 +15,7 @@ import { useArtistStore } from '../stores/artist'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
+import { useSeekBar } from '../composables/useSeekBar'
 import { bigCoverUrl } from '../utils/cover'
 import { cleanIpcError, formatTime } from '../utils/format'
 import { downloadCover } from '../utils/ipc'
@@ -27,8 +28,28 @@ const artistStore = useArtistStore()
 
 const lyricBox = ref<HTMLElement | null>(null)
 const toast = ref<string | null>(null)
-const seeking = ref(false)
-const seekValue = ref(0)
+
+/**
+ * 进度条交互与底部播放条共用一份实现（composables/useSeekBar.ts）。
+ * 两条进度条曾经各写一套，结果缩略条漏发 change 时坏掉、这条还是好的 ——
+ * 现在只有一份逻辑，修一处即两条一起修。
+ */
+const {
+  seeking,
+  seekInputEl,
+  seekMax,
+  displayProgress,
+  displayTime,
+  syncSeekInput,
+  onSeekKeydown,
+  onSeekInput,
+  onSeekCommit,
+  onSeekPointerDown,
+  onSeekPointerMove,
+  onSeekPointerUp,
+  onSeekLostCapture,
+  onSeekPointerCancel
+} = useSeekBar()
 
 /**
  * 轨道像素宽度（不带单位的数字，契约里只有圆点需要）。
@@ -233,53 +254,13 @@ function openAlbumPage(): void {
 
 /* ------------------------------ 进度条 ------------------------------ */
 
-/**
- * 「填充/滑块」与「鼠标位置」在任何时刻只能有**一个**位置来源。
- *
- * 旧写法 `seeking ? seekValue : player.progress` 有两个错位来源：
- *  1. `change` 里立刻把 `seeking=false`，而 store 的 progress 还没更新 →
- *     填充先弹回旧位置、等 store 追上再跳过去（用户看到的「在鼠标后面」）；
- *  2. 原生 range 的 value 走 `seekBase`（低频同步），与 `--p` 是两套来源
- *     （原生滑块不可见，但它的 value 仍会影响键盘基准）。
- * 现在：提交时记下**目标百分比**并保持住，直到 `player.progress` 真正追上
- * （阈值 1%，另有 600ms 兜底），期间只有一个来源 —— 鼠标落点。
+/*
+ * 位置来源唯一化、拖动提交、落点换算、静默兜底，全部在 composables/useSeekBar.ts。
+ * 这里只留一句历史教训：旧写法 `seeking ? seekValue : player.progress` 会让填充
+ * 在 `change` 之后先弹回旧位置、等 store 追上再跳；而且提交只挂在 `change` 上 ——
+ * 实测 Chromium 的 range 会漏发这个事件，漏发时条子被钉在拖动值上不动、
+ * 音频也停在原处（用户报的「滑到最开头，歌不跟着走」就是这么来的）。
  */
-const pendingSeek = ref<number | null>(null)
-let pendingTimer: ReturnType<typeof setTimeout> | null = null
-
-function holdSeekTarget(percent: number): void {
-  pendingSeek.value = percent
-  if (pendingTimer) clearTimeout(pendingTimer)
-  pendingTimer = setTimeout(() => {
-    pendingSeek.value = null
-    pendingTimer = null
-  }, 600)
-}
-
-const displayProgress = computed(() => {
-  if (seeking.value) return seekValue.value
-  if (pendingSeek.value !== null) return pendingSeek.value
-  return player.progress
-})
-
-/* store 追上目标就释放（数值判断，不用固定 sleep） */
-watch(
-  () => player.progress,
-  (p) => {
-    if (pendingSeek.value !== null && Math.abs(p - pendingSeek.value) < 1) {
-      pendingSeek.value = null
-      if (pendingTimer) {
-        clearTimeout(pendingTimer)
-        pendingTimer = null
-      }
-    }
-  }
-)
-
-onBeforeUnmount(() => {
-  if (pendingTimer) clearTimeout(pendingTimer)
-  pendingTimer = null
-})
 
 /**
  * range 的刻度用**秒**（min=0 / max=时长 / step=5）：键盘一次 ←/→ 正好 5 秒，
@@ -287,87 +268,9 @@ onBeforeUnmount(() => {
  * 仍然**不绑 `:value`**：写 range 的 value 会重排输入框内部影子树（1 次布局/次），
  * 播放期间一次都不该写；基准只在 focus / keydown / 换歌 / 播放态变化时同步。
  *
- * ⚠️ 别把 step 调细（例如 0.1）来换点击精度 —— 实测会让指针命中一起坏掉，见
- * onSeekKeydown 上方那段说明。
+ * ⚠️ 别把 step 调细（例如 0.1）来换点击精度 —— 实测会让指针命中一起坏掉。
+ * 点击/拖动的精度改由「指针像素反算」解决（useSeekBar），与 step 解耦。
  */
-const seekInputEl = ref<HTMLInputElement | null>(null)
-const seekMax = computed(() => Math.max(0, Math.floor(player.duration || 0)))
-
-function syncSeekInput(): void {
-  const el = seekInputEl.value
-  if (!el) return
-  const seconds = seeking.value
-    ? (seekValue.value / 100) * (player.duration || 0)
-    : player.currentTime
-  // 与 step=5 对齐（秒刻度）
-  const next = String(Math.round(seconds))
-  if (el.value !== next) el.value = next
-}
-
-/**
- * 键盘步进。
- *
- * ⚠️ 这里**不要改成拦截 ArrowLeft/ArrowRight 手动 ±5 秒** —— 我试过：
- * 把 `step` 从 5 改成 0.1（想让点击落点更准），并在 keydown 里自己实现 5 秒。
- * 结果**点击与拖动一起坏了**：误差从 ≤2px 变成 −12/−76.6/−141px、回弹帧 146，
- * 且是在 `document.hidden=false`、rAF 88 帧的可信环境下复现的。
- * 说明 `step` 的取值本身会影响 range 的指针命中行为，不是纯量化精度问题。
- * 已回退。目前 step=5 与点击精度（≤2px 级）是可以共存的，别为了 3.9px 的理论
- * 量化误差去动它 —— 那会换来一个更大的真实回归。
- * 如需继续追这条，先做「同一构建、只改 step」的对照，并全程带 rAF 环境守卫。
- */
-function onSeekKeydown(event: KeyboardEvent): void {
-  const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']
-  if (keys.includes(event.key)) syncSeekInput()
-}
-
-/**
- * 换歌时必须把「钉住的目标位置」清掉。
- *
- * pendingSeek 是为「拖动/点击后等 store 追上」设计的，最长保持 600ms。
- * 如果在它还没释放时换了歌，displayProgress 会优先返回这个旧目标，
- * 界面就停在上一次的百分比上 —— 这是「切歌了进度条没归零」的另一个来源。
- */
-watch(
-  () => player.current?.id,
-  () => {
-    pendingSeek.value = null
-    if (pendingTimer) {
-      clearTimeout(pendingTimer)
-      pendingTimer = null
-    }
-    syncSeekInput()
-  }
-)
-watch(() => player.playing, syncSeekInput)
-
-const displayTime = computed(() =>
-  seeking.value && player.duration > 0
-    ? (seekValue.value / 100) * player.duration
-    : player.currentTime
-)
-
-function onSeekInput(event: Event): void {
-  seeking.value = true
-  const total = player.duration
-  seekValue.value = total > 0 ? (Number((event.target as HTMLInputElement).value) / total) * 100 : 0
-}
-
-/**
- * 提交：先把目标位置钉住，再让 store 去追。
- * 这样 `change` 之后即使 store 还没更新，填充也停在鼠标落点上（不回弹）；
- * 只发 `change` 不发 `input` 的浏览器（第 3 种错位来源）也走这一条路。
- */
-function onSeekCommit(event: Event): void {
-  const seconds = Number((event.target as HTMLInputElement).value)
-  const total = player.duration
-  const percent = total > 0 ? (seconds / total) * 100 : 0
-  seekValue.value = percent
-  holdSeekTarget(percent)
-  player.seek(seconds)
-  seeking.value = false
-  syncSeekInput()
-}
 
 /* ------------------------------ 歌词滚动 ------------------------------ */
 
@@ -583,6 +486,11 @@ async function saveCover(): Promise<void> {
               @keydown="onSeekKeydown"
               @input="onSeekInput"
               @change="onSeekCommit"
+              @pointerdown="onSeekPointerDown"
+              @pointermove="onSeekPointerMove"
+              @pointerup="onSeekPointerUp"
+              @pointercancel="onSeekPointerCancel"
+              @lostpointercapture="onSeekLostCapture"
             />
           </div>
           <span class="time mono faint">{{ formatTime(player.duration) }}</span>
@@ -1025,6 +933,15 @@ async function saveCover(): Promise<void> {
 .seek-wrap:hover .seek-knob,
 .seek-wrap.seeking .seek-knob {
   --knob-scale: 1.15;
+}
+
+/**
+ * 拖动中关掉填充与滑块的 520ms 过渡：拖动是直接操作，必须 1:1 跟手。
+ * 带着缓动拖，填充会明显落后于指针 —— 那正是「进度条有偏差」的观感来源。
+ */
+.seek-wrap.seeking .seek-fill,
+.seek-wrap.seeking .seek-knob {
+  transition: none;
 }
 
 .seek-wrap:hover .seek-rail,

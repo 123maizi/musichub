@@ -10,6 +10,7 @@ import PlaylistMenu from './PlaylistMenu.vue'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
+import { useSeekBar } from '../composables/useSeekBar'
 import { formatTime } from '../utils/format'
 import { copyText, songCopyText } from '../utils/clipboard'
 
@@ -25,8 +26,28 @@ const MODE_ICON = {
   shuffle: 'shuffle'
 } as const
 
-const seeking = ref(false)
-const seekValue = ref(0)
+/**
+ * 进度条交互全部来自 useSeekBar（与正在播放页共用一套）。
+ * 这里不再自己维护 seeking / seekValue —— 两条进度条各写一份，
+ * 正是「缩略条坏了、大条还好的」那类问题的来源。
+ */
+const {
+  seeking,
+  seekValue,
+  seekInputEl,
+  seekMax,
+  displayProgress,
+  pendingSeek,
+  syncSeekInput,
+  onSeekKeydown,
+  onSeekInput,
+  onSeekCommit,
+  onSeekPointerDown,
+  onSeekPointerMove,
+  onSeekPointerUp,
+  onSeekLostCapture,
+  onSeekPointerCancel
+} = useSeekBar()
 
 /**
  * 轨道像素宽度（**不带单位的数字**，契约里只有圆点需要它）。
@@ -136,60 +157,6 @@ const isCurrentFavorite = computed(() =>
   player.current ? library.isFavorite(player.current.id) : false
 )
 
-/**
- * 原生 range：**不再用 `:value` 绑定**，改由 DOM 自己持有值，只在明确时机同步。
- *
- * 为什么要这样：绑 `:value` 时每次渲染都要比较并可能写 value，而写 range 的
- * value 会让浏览器重排输入框内部影子树（实测 1.02 次布局/更新）。
- * 刻度也改成**秒**（min=0, max=时长, step=5）：这样键盘一次 ←/→ 正好 5 秒，
- * 与 store 的位置一一对应，不必在百分比与秒之间来回换算。
- */
-const seekInputEl = ref<HTMLInputElement | null>(null)
-const seekMax = computed(() => Math.max(0, Math.floor(player.duration || 0)))
-
-/** 同步 DOM 值到真实进度。只在「用户即将用它」的时刻调用，平时一次都不写。 */
-function syncSeekInput(): void {
-  const el = seekInputEl.value
-  if (!el) return
-  const seconds = seeking.value
-    ? (seekValue.value / 100) * (player.duration || 0)
-    : player.currentTime
-  const next = String(Math.round(seconds))
-  if (el.value !== next) el.value = next
-}
-
-/**
- * 键盘改值前先把基准对齐到真实进度。
- * keydown 早于浏览器对 range 的默认步进，所以这里同步完，紧接着的
- * ←/→ 就是「从当前真实位置再走 5 秒」，绝不会从 1 秒前的旧值起步。
- *
- * ⚠️ 别改成「拦截 ←/→ 手动 ±5 秒 + 把 step 调细」—— 我在 NowPlayingView 上试过，
- * 会让点击与拖动一起坏掉（误差 −12/−76.6/−141px、回弹 146，且在可信环境下复现）。
- */
-function onSeekKeydown(event: KeyboardEvent): void {
-  const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']
-  if (keys.includes(event.key)) syncSeekInput()
-}
-
-/**
- * 换歌 / 播放状态变化时把基准跟上（这两个时机频率极低）。
- *
- * 换歌时还要清掉 pendingSeek：它是「拖动后等 store 追上」用的钉住值，
- * 最长保持 600ms；不清的话它会优先于真实进度，界面就停在上一首的百分比上。
- */
-watch(
-  () => player.current?.id,
-  () => {
-    pendingSeek.value = null
-    if (pendingTimer) {
-      clearTimeout(pendingTimer)
-      pendingTimer = null
-    }
-    syncSeekInput()
-  }
-)
-watch(() => player.playing, syncSeekInput)
-
 onMounted(() => {
   syncSeekInput()
   const el = railEl.value
@@ -203,90 +170,13 @@ onMounted(() => {
 })
 
 /**
- * 位置来源唯一化：提交后把**目标百分比**钉住，直到 store 的 progress 追上
- * （阈值 1%，600ms 兜底）。否则 `seeking=false` 的那一刻填充会先弹回旧位置、
- * 等 store 追上再跳 —— 用户看到的就是「进度条在鼠标前面/后面」。
- */
-const pendingSeek = ref<number | null>(null)
-let pendingTimer: ReturnType<typeof setTimeout> | null = null
-
-function holdSeekTarget(percent: number): void {
-  pendingSeek.value = percent
-  if (pendingTimer) clearTimeout(pendingTimer)
-  pendingTimer = setTimeout(() => {
-    pendingSeek.value = null
-    pendingTimer = null
-  }, 600)
-}
-
-/** 拖动时用本地值预览；提交后用钉住的目标；其余时间跟 store */
-const displayProgress = computed(() => {
-  if (seeking.value) return seekValue.value
-  if (pendingSeek.value !== null) return pendingSeek.value
-  return player.progress
-})
-
-watch(
-  () => player.progress,
-  (p) => {
-    if (pendingSeek.value !== null && Math.abs(p - pendingSeek.value) < 1) {
-      pendingSeek.value = null
-      if (pendingTimer) {
-        clearTimeout(pendingTimer)
-        pendingTimer = null
-      }
-    }
-  }
-)
-
-onBeforeUnmount(() => {
-  if (pendingTimer) clearTimeout(pendingTimer)
-  pendingTimer = null
-})
-
-function onSeekInput(event: Event): void {
-  seeking.value = true
-  const total = player.duration
-  seekValue.value = total > 0 ? (Number((event.target as HTMLInputElement).value) / total) * 100 : 0
-}
-
-function onSeekCommit(event: Event): void {
-  const seconds = Number((event.target as HTMLInputElement).value)
-  const total = player.duration
-  const percent = total > 0 ? (seconds / total) * 100 : 0
-  seekValue.value = percent
-  holdSeekTarget(percent)
-  player.seek(seconds)
-  seeking.value = false
-  syncSeekInput()
-}
-
-/**
- * 「拖动中」的看门狗。
- *
- * 若拖动的收尾事件没到（拖到窗口外松手、或浏览器没派发 change），
- * `seeking` 会永远停在 true —— 此时显示进度被 seekValue 接管，
- * 表现为「条子卡住不动、好像划不动」。这里兜一道：拖动状态最多维持 2 秒，
- * 到点自动交还给真实进度。正常的拖动几百毫秒就提交了，不会误触发。
- */
-let seekingWatchdog: ReturnType<typeof setTimeout> | null = null
-watch(seeking, (on) => {
-  if (seekingWatchdog) {
-    clearTimeout(seekingWatchdog)
-    seekingWatchdog = null
-  }
-  if (!on) return
-  seekingWatchdog = setTimeout(() => {
-    seeking.value = false
-    seekingWatchdog = null
-    syncSeekInput()
-  }, 2000)
-})
-
-/**
  * 旧的「低频基准 + 字符串绑定」方案已删除 ——
  * 它仍然每秒写一次 value（1 次布局/秒），换成「不绑 value + 在 focus/keydown/换歌时同步」
  * 之后，播放期间对 range 的写入为 0。
+ *
+ * 拖动、提交、看门狗与落点换算全部搬到 composables/useSeekBar.ts：
+ * 那一段的正确性依赖「Chromium 会漏发 change」这条实测结论，
+ * 两条进度条必须共用同一份，不能各写各的。
  */
 
 function onVolume(event: Event): void {
@@ -355,6 +245,11 @@ function openPlaylistMenu(event: MouseEvent): void {
         @keydown="onSeekKeydown"
         @input="onSeekInput"
         @change="onSeekCommit"
+        @pointerdown="onSeekPointerDown"
+        @pointermove="onSeekPointerMove"
+        @pointerup="onSeekPointerUp"
+        @pointercancel="onSeekPointerCancel"
+        @lostpointercapture="onSeekLostCapture"
       />
     </div>
 
@@ -639,6 +534,18 @@ function openPlaylistMenu(event: MouseEvent): void {
 .progress-track:hover .progress-knob,
 .progress-track.seeking .progress-knob {
   --knob-scale: 1.15;
+}
+
+/**
+ * 拖动中必须**关掉填充与滑块的过渡**。
+ *
+ * 它们的过渡是 520ms（--dur-3）：正常播放时那点惯性很好看，但拖动的每一帧
+ * 都要等 520ms 才追上指针 —— 快速往回拖时，填充明显落后于鼠标，
+ * 用户描述成「进度条有偏差」。拖动是直接操作，必须 1:1。
+ */
+.progress-track.seeking .progress-fill,
+.progress-track.seeking .progress-knob {
+  transition: none;
 }
 
 .progress-track:hover .progress-rail,
