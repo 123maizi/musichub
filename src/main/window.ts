@@ -15,6 +15,15 @@ export function createWindow(): BrowserWindow {
     show: false,
     autoHideMenuBar: true,
     title: 'Mz Hearken',
+    /**
+     * 开发模式下的窗口/任务栏图标。
+     *
+     * 打包后任务栏图标来自 exe 内嵌的 icon.ico（electron-builder 打进去的那 7 档），
+     * 但**开发模式**跑的是 node_modules 里那个 electron.exe —— 它的图标就是 Electron 的
+     * 默认图标，跟我们的 brand 完全无关。用户从开发快捷方式启动时会误以为「logo 没变」。
+     * 这里只在未打包时显式指定，打包后仍由 exe 图标负责（不要抢它的活）。
+     */
+    icon: is.dev ? join(__dirname, '../../build/icon.ico') : undefined,
     // 深色底，避免加载瞬间白屏闪一下
     backgroundColor: '#0b0b0f',
     webPreferences: {
