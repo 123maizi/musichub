@@ -505,19 +505,21 @@ function openPlaylistMenu(event: MouseEvent): void {
 }
 
 /**
- * 方头滑块：零圆角体系里的「刻刀」。
- * 8×12 的硬边青铜方块，外面一圈同底色的描边把它从填充里切出来（不用阴影）。
- * 位置由 transform 驱动（见下），命中区由上面的 24px track 兜住。
+ * 圆形滑块：一颗 13px 的青铜圆点，外面一圈同底色描边把它从填充里切出来（不用阴影）。
+ *
+ * 原来是 8×12 的"方头刻刀"（配合零圆角体系）。用户明确要求改成圆形 ——
+ * 这里记一笔：播放条与详情页的两颗滑块必须一致，只改一处会出现"两页两种手感"。
+ * 位置仍由 transform 驱动，命中区由上面 24px 的轨道兜住。
  */
 .progress-knob {
-  --knob-size: 8px;
+  --knob-size: 13px;
   position: absolute;
   top: 50%;
   left: 0;
   width: var(--knob-size);
-  height: 12px;
+  height: var(--knob-size);
   margin-left: calc(var(--knob-size) / -2);
-  border-radius: var(--r-card);
+  border-radius: 50%;
   background: var(--progress);
   border: 2px solid var(--surface-1);
   /**
@@ -620,12 +622,12 @@ function openPlaylistMenu(event: MouseEvent): void {
   cursor: pointer;
 }
 
-/* 缩略图：零圆角硬边 + 刻线 */
+/* 缩略图：圆角（用户要求「别太方正」），与列表缩略图同一套 --r-media */
 .cover {
   flex: none;
   width: 46px;
   height: 46px;
-  border-radius: var(--r-card);
+  border-radius: var(--r-media);
   overflow: hidden;
   background: var(--surface-2);
   border: 1px solid var(--hairline);
@@ -679,7 +681,8 @@ function openPlaylistMenu(event: MouseEvent): void {
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: var(--r-ctl);
+  /* 传输控制改圆形（用户要求）；其余界面仍保持零圆角体系 */
+  border-radius: 50%;
   background: transparent;
   border: none;
   color: var(--ink-muted);
@@ -703,7 +706,7 @@ function openPlaylistMenu(event: MouseEvent): void {
 .ctrl.main {
   width: 36px;
   height: 36px;
-  border-radius: var(--r-ctl);
+  border-radius: 50%;
   background: var(--accent);
   color: var(--on-accent);
 }

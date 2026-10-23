@@ -1,7 +1,7 @@
 {
   "name": "musichub",
   "productName": "Mz Hearken",
-  "version": "2.0.1",
+  "version": "2.1.1",
   "description": "Mz Hearken（埋子 · 聆听）- 多音源音乐聚合播放与下载器",
   "main": "./out/main/index.js",
   "author": "埋子 (Mz)",

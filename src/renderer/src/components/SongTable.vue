@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Song } from '@shared/types/music'
 import { PLATFORM_META, QUALITY_META, findFormat, qualityRank } from '@shared/constants'
 import { useRouter } from 'vue-router'
-import { formatTime } from '../utils/format'
+import { formatTime, splitArtists } from '../utils/format'
 import { copyText, songCopyText } from '../utils/clipboard'
 import { useDownloadStore } from '../stores/downloads'
 import { useLibraryStore } from '../stores/library'
@@ -312,12 +312,21 @@ function isLossless(song: Song): boolean {
           </div>
           <div class="title-text">
             <div class="title ellipsis" :title="song.name">{{ song.name }}</div>
-            <div
-              class="singer ellipsis clickable"
-              :title="`搜索歌手：${song.singer}`"
-              @click.stop="emit('search', song.singer)"
-            >
-              {{ song.singer }}
+            <!--
+              多艺人拆成独立的可点项（用户要求「一个作者一个」）。
+              整个字符串一次性拿去做搜索时，接口往往只认第一个名字，
+              点「西原健一郎、Substantial」就永远只到第一个人。
+            -->
+            <div class="singer ellipsis">
+              <template v-for="(artist, i) in splitArtists(song.singer)" :key="`${artist}-${i}`">
+                <span v-if="i > 0" class="singer-sep">、</span>
+                <span
+                  class="clickable"
+                  :title="`搜索歌手：${artist}`"
+                  @click.stop="emit('search', artist)"
+                  >{{ artist }}</span
+                >
+              </template>
             </div>
           </div>
         </div>
@@ -657,6 +666,12 @@ function isLossless(song: Song): boolean {
 .singer {
   font-size: var(--fs-xs);
   color: var(--ink-muted);
+}
+
+/* 拆开后每个艺人是独立可点项，分隔符不参与点击 */
+.singer-sep {
+  color: var(--ink-faint);
+  pointer-events: none;
 }
 
 /* 歌手 / 专辑名可点：点一下就去搜它 */

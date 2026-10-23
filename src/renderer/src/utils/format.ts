@@ -192,13 +192,42 @@ export function mergeTranslation(lines: LyricLine[], tlyric?: string): LyricLine
  * `\b` 是「\w 与非 \w 的边界」，而汉字不属于 \w —— 「制作人 : Steve Mac」里
  * 「人」和空格之间根本没有边界，于是所有中文角色词（制作人/作词/作曲/主人声…）
  * 全部漏判、继续混在歌词流里（实测第一次就漏了 24 行里的大部分）。
- * 改成「后面跟冒号、空白或行尾」才认。
+ *
+ * ⚠️ 也不能要求角色词后**立刻**跟冒号。
+ * 真实歌词里大量是带后缀的：「录音**助理**: 刘勇志」「合声**编写**: 周杰伦」
+ * 「混音**工程**: 杨大纬」—— 角色词后面还有 1~4 个字才到冒号。
+ * 只认「角色词 + 冒号」时，这些行会继续留在歌词区（用户截图里正是这几行）。
+ * 现在允许中间夹 0~4 个非空白字符再跟冒号，并补上「合声」这个常见写法。
  */
 const META_ROLE =
-  /^\s*(作词|作曲|编曲|制作人|出品|监制|混音|母带|录音|配唱|和声|主人声|人声|吉他|贝斯|鼓|键盘|弦乐|钢琴|词|曲|OP|SP|Producer|Writer|Composer|Arranger|Lyricist|Mixed|Mastered|Recorded|Sample|Label|Vocals?|Guitar|Bass|Drums|Piano|Strings)(?=\s*[:：]|\s|$)/i
+  /^\s*(作词|作曲|编曲|制作人|出品|监制|混音|母带|录音|配唱|和声|合声|主人声|人声|吉他|贝斯|鼓|键盘|弦乐|钢琴|风声|发行|企划|统筹|OP|SP|词|曲|Producer|Writer|Composer|Arranger|Lyricist|Mixed|Mastered|Recorded|Sample|Label|Vocals?|Guitar|Bass|Drums|Piano|Strings)[^\s:：]{0,4}\s*(?:[:：]|$)/i
+
+/**
+ * 英文里另一类 credits 没有冒号，是「动词 + at/by + 地点/人名」：
+ * `Mixed at The Mixsuite`、`Recorded at Rokstone Studios`、`Mastered by ...`。
+ * 这类行用 ASCII 词边界判断是安全的（`\b` 对英文有效，问题只出在汉字上）。
+ */
+const META_ROLE_EN = /^\s*(?:Mixed|Recorded|Mastered|Produced|Engineered|Arranged|Written)\b/i
 
 export function isLyricMetaLine(text: string): boolean {
-  return META_ROLE.test(text)
+  return META_ROLE.test(text) || META_ROLE_EN.test(text)
+}
+
+/**
+ * 把「甲、乙、丙」这类合唱署名拆成单个艺人。
+ *
+ * 为什么只认「、」和 feat./ft.：
+ *  · 逗号不能拆 —— `Leslie Odom, Jr.` 会被腰斩成 `Leslie Odom` + `Jr.`
+ *  · 斜杠不能拆 —— `AC/DC` 会被拆成 `AC` + `DC`
+ * 宁可少拆，不可拆错：拆错的代价是点艺人跳到完全不相干的人。
+ */
+export function splitArtists(singer: string | null | undefined): string[] {
+  const raw = String(singer ?? '').trim()
+  if (!raw) return []
+  return raw
+    .split(/[\u3001\uff1b;]|\s+(?:feat\.?|ft\.?)\s+/i)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
 }
 
 /**

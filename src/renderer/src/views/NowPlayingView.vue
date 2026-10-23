@@ -17,7 +17,7 @@ import { useLibraryStore } from '../stores/library'
 import { usePlayerStore } from '../stores/player'
 import { useSeekBar } from '../composables/useSeekBar'
 import { bigCoverUrl } from '../utils/cover'
-import { cleanIpcError, formatTime } from '../utils/format'
+import { cleanIpcError, formatTime, splitArtists } from '../utils/format'
 import { downloadCover } from '../utils/ipc'
 
 const router = useRouter()
@@ -196,16 +196,26 @@ function artistCandidates(raw: string): string[] {
   return out.slice(0, 3)
 }
 
+/** 多艺人拆开（「甲、乙」→ 两个可点项）；点谁去谁的艺人页 */
+const artists = computed(() => splitArtists(player.current?.singer))
+
 const artistTitle = computed(() => {
   const singer = player.current?.singer
   return singer ? `查看「${singer}」的艺人页` : ''
 })
 
-async function openArtistPage(): Promise<void> {
+/**
+ * 打开艺人页。
+ *
+ * `only` 指定单个艺人名（多艺人署名拆开后点某个名字时传进来）。
+ * 不传时退化为整串搜索，并逐个尝试候选、只认「名字完全一致」的结果 ——
+ * 多歌手拼成的名字拿去搜，首条结果十有八九是别人，直接取会开错主页。
+ */
+async function openArtistPage(only?: string): Promise<void> {
   const song = player.current
   if (!song || openingArtist.value) return
 
-  const raw = (song.singer ?? '').trim()
+  const raw = (only ?? song.singer ?? '').trim()
   if (!raw) return
 
   openingArtist.value = true
@@ -283,20 +293,49 @@ function openAlbumPage(): void {
 
 /* ------------------------------ 歌词滚动 ------------------------------ */
 
+/**
+ * 把第 index 行滚到歌词框的垂直中央。
+ * `smooth=false` 用于「换歌后的初始定位」——那种场合应该瞬间到位，
+ * 否则会看到一段从顶部滑下来的动画，观感上是「先闪一屏空白再滚」。
+ */
+async function scrollToLine(index: number, smooth: boolean): Promise<void> {
+  const box = lyricBox.value
+  if (!box) return
+  await nextTick()
+  const line = box.querySelector<HTMLElement>(`[data-line="${index}"]`)
+  if (!line) return
+  // 用容器自身滚动，避免把整个页面顶跑
+  const top = line.offsetTop - box.clientHeight / 2 + line.clientHeight / 2
+  if (smooth) box.scrollTo({ top, behavior: 'smooth' })
+  else box.scrollTop = Math.max(0, top)
+}
+
+/**
+ * 跟随当前行。
+ *
+ * ⚠️ 之前只在 `index >= 0` 时滚动。新歌刚开始播、还没唱到第一句时 index 是 -1，
+ * 于是歌词框停在最顶部 —— 顶部那 42% 的「居中占位」就变成一大片空白
+ * （用户反馈：「每次重新打开歌，总是移动到最上面那有一大部分空白」）。
+ * 现在：没到第一句时定位到第 0 行（视觉上就是「歌词已就位、在等第一句」）。
+ *
+ * 另外单独盯 `lyricLines.length` 与歌曲 id：换歌后歌词是异步换的，
+ * 只盯 index 会在「index 没变」的情况下漏掉重新定位。
+ */
 watch(
-  () => player.currentLyricIndex,
-  async (index) => {
-    const box = lyricBox.value
-    if (index < 0 || !box) return
-    await nextTick()
-    const line = box.querySelector<HTMLElement>(`[data-line="${index}"]`)
-    if (!line) return
-    // 用容器自身滚动，避免把整个页面顶跑
-    box.scrollTo({
-      top: line.offsetTop - box.clientHeight / 2 + line.clientHeight / 2,
-      behavior: 'smooth'
-    })
-  }
+  () => [lyricBox.value, player.currentLyricIndex, player.lyricLines.length, player.current?.id] as const,
+  ([box, index, , songId], previous) => {
+    if (!box) return
+    const songChanged = previous ? previous[3] !== songId : false
+    void scrollToLine(index >= 0 ? index : 0, index >= 0 && !songChanged)
+  },
+  /**
+   * flush: 'post' 必须加 —— 歌词行是刚渲染出来的，若在 DOM 更新前测量
+   * offsetTop/clientHeight 全是 0，滚动会算成 0（第一版就踩了这个：
+   * 量出来 scrollTop 仍然是 0，那片空白原封不动）。
+   * 同时把 lyricBox 纳入监听源：组件挂载时 ref 还是 null，
+   * 只盯 index 的话挂载那一次会被 `if (!box) return` 吞掉，之后再没人触发。
+   */
+  { immediate: true, flush: 'post' }
 )
 
 /* ------------------------------ 操作 ------------------------------ */
@@ -421,13 +460,25 @@ async function saveCover(): Promise<void> {
             {{ player.current?.name ?? '未在播放' }}
           </h1>
           <div class="sub">
+            <!-- 多艺人拆成独立可点项：点谁去谁的艺人页，不再"总是第一个" -->
+            <template v-for="(artist, i) in artists" :key="`${artist}-${i}`">
+              <span v-if="i > 0" class="artist-sep">、</span>
+              <button
+                class="jump"
+                :disabled="!player.current || openingArtist"
+                :title="`查看「${artist}」的艺人页`"
+                @click="openArtistPage(artist)"
+              >
+                <span class="ellipsis">{{ artist }}</span>
+              </button>
+            </template>
             <button
+              v-if="artists.length === 0"
               class="jump"
-              :disabled="!player.current || openingArtist"
+              disabled
               :title="artistTitle"
-              @click="openArtistPage"
             >
-              <span class="ellipsis">{{ player.current?.singer ?? '—' }}</span>
+              <span class="ellipsis">—</span>
             </button>
             <span v-if="player.current" class="faint"> · {{ platformName }}</span>
           </div>
@@ -505,22 +556,24 @@ async function saveCover(): Promise<void> {
           <span class="time mono faint">{{ formatTime(player.duration) }}</span>
         </div>
 
-        <!-- 传输控制 -->
+        <!-- 传输控制：三个键做成整栏居中，模式键靠右 -->
         <div class="controls">
-          <button class="ctrl" title="上一首" :disabled="player.playlist.length === 0" @click="player.playPrev()">
-            <AppIcon name="prev" :size="22" />
-          </button>
-          <button
-            class="ctrl main"
-            :title="player.playing ? '暂停' : '播放'"
-            :disabled="!player.current || player.loading"
-            @click="player.toggle()"
-          >
-            <AppIcon :name="player.playing ? 'pause' : 'play'" :size="24" />
-          </button>
-          <button class="ctrl" title="下一首" :disabled="player.playlist.length === 0" @click="player.playNext()">
-            <AppIcon name="next" :size="22" />
-          </button>
+          <div class="transport">
+            <button class="ctrl" title="上一首" :disabled="player.playlist.length === 0" @click="player.playPrev()">
+              <AppIcon name="prev" :size="22" />
+            </button>
+            <button
+              class="ctrl main"
+              :title="player.playing ? '暂停' : '播放'"
+              :disabled="!player.current || player.loading"
+              @click="player.toggle()"
+            >
+              <AppIcon :name="player.playing ? 'pause' : 'play'" :size="24" />
+            </button>
+            <button class="ctrl" title="下一首" :disabled="player.playlist.length === 0" @click="player.playNext()">
+              <AppIcon name="next" :size="22" />
+            </button>
+          </div>
           <button class="mode-btn" :title="player.modeLabel" @click="player.cycleMode()">
             <AppIcon :name="MODE_ICON[player.mode]" :size="15" />
             <span>{{ player.modeLabel }}</span>
@@ -635,17 +688,7 @@ async function saveCover(): Promise<void> {
         </div>
 
         <div v-else ref="lyricBox" class="lyric-box">
-          <!--
-            歌曲信息（作词/作曲/编曲/制作人…）单独放在最上面，不再混进歌词流。
-            这些行是元信息、通常没有译文，混在歌词里正是「一半有中文一半没有」的观感来源
-            （实测 Shape of You 116 行里有 24 行是这类）。信息不丢，只是不占歌词的位置。
-          -->
-          <div v-if="player.lyricInfoLines.length" class="lyric-info">
-            <span v-for="(info, index) in player.lyricInfoLines" :key="index" class="lyric-info-item">
-              {{ info.text }}
-            </span>
-          </div>
-          <div class="lyric-pad"></div>
+          <div class="lyric-pad top"></div>
           <div
             v-for="(line, index) in player.lyricLines"
             :key="index"
@@ -659,7 +702,19 @@ async function saveCover(): Promise<void> {
               {{ line.trans }}
             </span>
           </div>
-          <div class="lyric-pad"></div>
+          <div class="lyric-pad bottom"></div>
+        </div>
+
+        <!--
+          创作人名单（作词/作曲/编曲/制作人…）。
+          ⚠️ 第一版塞在歌词滚动区的**最顶部**：既被滚走、又用了 0.34 透明度的淡色，
+          用户的原话是「跑最上面去了，看都看不到」。
+          现在固定在歌词区下方（不参与滚动），颜色提到可读的层级，最多两行、超出可滚。
+        -->
+        <div v-if="hasLyric && player.lyricInfoLines.length" class="lyric-credits">
+          <span v-for="(info, index) in player.lyricInfoLines" :key="index" class="lyric-credits-item">
+            {{ info.text }}
+          </span>
         </div>
       </div>
     </div>
@@ -740,15 +795,21 @@ async function saveCover(): Promise<void> {
   display: grid;
   grid-template-columns: minmax(300px, 400px) 1fr;
   gap: var(--sp-7);
-  padding: var(--sp-6) 0 var(--sp-7);
+  /* 上下留白收紧：窄窗口下先保证左栏一屏放得下（原来是 sp-6 / sp-7 = 80px） */
+  padding: var(--sp-4) 0 var(--sp-3);
   overflow: hidden;
 }
 
 .left {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-5);
+  /**
+   * 间隙从 sp-5(24) 减到 sp-3(12)：左栏有 7 个子块、6 个间隙，
+   * 24px 的间距光空隙就吃掉 144px —— 窄窗口下这就是"必须滚动"的主因。
+   */
+  gap: 4px;
   min-height: 0;
+  /* 兜底：极端矮的窗口仍然可以滚，但正常尺寸下不该触发 */
   overflow-y: auto;
 }
 
@@ -761,6 +822,7 @@ async function saveCover(): Promise<void> {
  */
 .cover {
   position: relative;
+  /* 封面尺寸与圆角保持原样，不做任何改动（用户明确要求） */
   width: 100%;
   aspect-ratio: 1;
   border-radius: var(--r-card);
@@ -803,12 +865,13 @@ async function saveCover(): Promise<void> {
 .meta {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: 4px;
 }
 
 /* 标题走外壳的衬线体系（style.css 的 h1~h4），这里只收一档字号 */
 .meta h1 {
-  font-size: var(--fs-lg);
+  /* 随窗口高度微微缩放：矮窗口下标题不占三行（窄窗口曾把传输控制顶出可视区） */
+  font-size: clamp(18px, 2.8vh, var(--fs-lg));
   font-weight: var(--fw-semibold);
   line-height: var(--lh-tight);
   color: var(--ink);
@@ -832,7 +895,7 @@ async function saveCover(): Promise<void> {
   display: block;
   min-width: 0;
   max-width: 100%;
-  padding: var(--sp-1) var(--sp-2);
+  padding: 2px var(--sp-2);
   margin-left: calc(var(--sp-2) * -1);
   text-align: left;
   font: inherit;
@@ -862,18 +925,27 @@ async function saveCover(): Promise<void> {
 
 /* ------------------------------ 工具胶囊 ------------------------------ */
 
+/**
+ * 五个功能键必须**排成一排**（用户要求）。
+ *
+ * 原来 `flex-wrap: wrap` + 较宽的左右内边距，在 432px 的左栏里只放得下四个，
+ * 「存封面」被挤到第二行，看起来像层级错乱。
+ * 现在：不换行、间距与内边距收紧、按钮可收缩但不折行。
+ */
 .tools {
   display: flex;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
+  gap: var(--sp-1);
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .tool {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
+  gap: 5px;
+  padding: 5px var(--sp-2);
   font-size: var(--fs-xs);
+  white-space: nowrap;
   border-radius: var(--r-ctl);
   background: var(--surface-2);
   border: 1px solid var(--hairline);
@@ -948,16 +1020,16 @@ async function saveCover(): Promise<void> {
   transition: transform var(--dur-3) var(--ease-out);
 }
 
-/* 方头滑块：与播放条同一套（8×12 硬边青铜方块 + 同底色描边） */
+/* 圆形滑块：与播放条同一套（13px 青铜圆点 + 同底色描边） */
 .seek-knob {
-  --knob-size: 8px;
+  --knob-size: 13px;
   position: absolute;
   top: 50%;
   left: 0;
   width: var(--knob-size);
-  height: 12px;
+  height: var(--knob-size);
   margin-left: calc(var(--knob-size) / -2);
-  border-radius: var(--r-card);
+  border-radius: 50%;
   background: var(--progress);
   border: 2px solid var(--canvas);
   /* 契约规定 --track-w 是不带单位的数字，所以要补 `* 1px` 才能得到长度 */
@@ -1030,18 +1102,45 @@ async function saveCover(): Promise<void> {
 
 /* ------------------------------ 控制按钮 ------------------------------ */
 
+/**
+ * 传输控制。
+ *
+ * 布局：三键**绝对居中**（left:50% + translateX(-50%)），模式键靠右。
+ * 之前是普通 flex 左对齐：播放键中心 197、栏中心 305，差 108px —— 视觉上就是「歪的」。
+ * 先试过 `grid-template-columns: 1fr auto 1fr`，但模式键比 1fr 轨道宽 5px 时
+ * 会把中栏挤偏（实测偏 5px），所以改成绝对居中，彻底不受兄弟元素宽度影响。
+ *
+ * ⚠️ 试过 `position: sticky; bottom: 0`（让矮窗口下也能直接按暂停），
+ * 但它会在内容比视口高时**压在标题和功能键上面** —— 正是「一大片空白挡住功能键」
+ * 那种观感，所以撤掉了。
+ */
 .controls {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 60px;
+  margin-top: 0;
+}
+
+.transport {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: var(--sp-4);
-  margin-top: var(--sp-1);
+}
+
+.controls .mode-btn {
+  margin-left: auto;
 }
 
 .ctrl {
   width: 46px;
   height: 46px;
   padding: 0;
-  border-radius: var(--r-ctl);
+  /* 传输控制改圆形（用户要求）；其余界面仍保持零圆角体系 */
+  border-radius: 50%;
   background: transparent;
   border: none;
   color: var(--ink-muted);
@@ -1062,11 +1161,11 @@ async function saveCover(): Promise<void> {
   transform: scale(0.95);
 }
 
-/* 主按钮：青铜实心，零圆角零阴影（层次靠块面，不靠浮起） */
+/* 主按钮：青铜实心、圆形（用户要求），层次靠块面与投影，不靠描边 */
 .ctrl.main {
   width: 60px;
   height: 60px;
-  border-radius: var(--r-ctl);
+  border-radius: 50%;
   background: var(--accent);
   color: var(--on-accent);
   box-shadow: var(--shadow-2);
@@ -1131,6 +1230,20 @@ async function saveCover(): Promise<void> {
 }
 
 /**
+ * 顶部占位：原来也是 42%，把第一句压到歌词框 42% 的位置 ——
+ * 一首歌刚打开时，看起来就是「一大片空白」（用户反馈的原话）。
+ * 这里只留 64px：第一句贴着上方出现，后面的行继续滚动、仍能被滚到中间。
+ */
+.lyric-pad.top {
+  height: 64px;
+}
+
+/** 底部保留 42%：最后几行也滚得到中间 */
+.lyric-pad.bottom {
+  height: 42%;
+}
+
+/**
  * 歌词行。
  *
  * 行高、字号、常态色、以及「当前行」的过渡都由 styles/motion.css 的全局
@@ -1155,25 +1268,40 @@ async function saveCover(): Promise<void> {
 }
 
 /**
- * 歌曲信息行（作词/作曲/制作人…）。
+ * 创作人名单（作词/作曲/编曲/制作人…）。
  *
- * 刻意做得明显「不像歌词」：小字号、淡色、不参与当前行高亮、不可点击跳转 ——
- * 这样用户一眼就知道这部分不是歌词，也不会去数「这几行为什么没有中文」。
+ * 位置：固定在歌词滚动区**下方**、不参与滚动 —— 上一版塞在滚动区顶部，
+ * 一滚动就没了，用户反馈「跑最上面去了，看都看不到」。
+ *
+ * 可读性：不再用 0.34 透明度的淡色 + 0.75 整体透明度（两层叠加后几乎看不见），
+ * 改成 --ink-muted 实色；字号仍是小号、不加粗，保持「这不是歌词」的层级感。
+ * 最多两行，超出自行滚动，不会把歌词区挤没。
  */
-.lyric-info {
+.lyric-credits {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-2) var(--sp-4);
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
-  margin-bottom: var(--sp-2);
-  border-bottom: 1px solid var(--hairline);
+  gap: 2px var(--sp-4);
+  /**
+   * 3.2em 正好等于两行（line-height 1.6 × 2）—— 第二行的下沉笔画会被切掉。
+   * 给到 4.4em 并留底部内边距，两行完整可见；再多的部分才滚动。
+   */
+  max-height: 4.4em;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: var(--sp-2) var(--sp-3) var(--sp-2);
+  margin-top: var(--sp-1);
+  border-top: 1px solid var(--hairline);
   font-size: var(--fs-xs);
   line-height: 1.6;
-  color: var(--ink-faint, var(--ink-muted));
-  opacity: 0.75;
+  color: var(--ink-muted);
 }
 
-.lyric-info-item {
+.lyric-credits::-webkit-scrollbar {
+  display: none;
+}
+
+.lyric-credits-item {
   white-space: nowrap;
 }
 
