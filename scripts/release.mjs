@@ -58,6 +58,14 @@ async function api(url, init = {}) {
 
 const notes = readFileSync(notesPath, 'utf8')
 
+/**
+ * Release 标题取说明文件的 H1（例如「Mz Hearken 2.1.1 · 焕新重生」）。
+ * 之前写死成 `${version}`，发布页标题就只剩个 "2.1.1"，正文里的版本主题
+ * （「焕新重生」这类代号）在列表里完全看不见。
+ */
+const titleFromNotes = (notes.match(/^#\s+(.+)$/m) ?? [])[1]?.trim()
+const releaseName = titleFromNotes || `Mz Hearken ${version}`
+
 /* ---------------- 1. 已有就复用，没有才建 ---------------- */
 console.log(`[1] 查询 ${tag} 是否已有 Release`)
 let rel = (await api(`${OWNER_API}/releases/tags/${tag}`)).body
@@ -66,11 +74,11 @@ if (rel && rel.id) {
   console.log(`    已存在，复用 id=${rel.id}`)
   // 说明要跟着代码走：覆盖安装包时描述也得同步，
   // 否则 release 页写的还是上一版的内容
-  if (rel.body !== notes) {
+  if (rel.body !== notes || rel.name !== releaseName) {
     const patched = await api(`${OWNER_API}/releases/${rel.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body: notes })
+      body: JSON.stringify({ name: releaseName, body: notes })
     })
     console.log(`    说明已同步: ${patched.ok ? '✓' : `✗ HTTP ${patched.status}`}`)
     if (patched.ok) rel = patched.body
@@ -84,7 +92,7 @@ if (rel && rel.id) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       tag_name: tag,
-      name: `${version}`,
+      name: releaseName,
       body: notes,
       draft: false,
       prerelease: false
