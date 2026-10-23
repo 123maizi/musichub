@@ -19,7 +19,7 @@
 
 from pathlib import Path
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
@@ -29,6 +29,14 @@ SOURCE = BUILD / "logo-source.png"
 S = 1024                 # 统一在大画布上排版，再降采样
 PAPER = (255, 255, 255)
 INK_THRESHOLD = 235      # 低于这个通道值算作墨迹（金色部分也吃得住）
+"""
+四角圆滑的半径（占画布比例）。
+
+0.18 是「看得出圆、但不像胶囊」的区间：Windows 11 应用图块大致在 0.15~0.2，
+macOS 的 squircle 更接近 0.22。这里取 0.18，16px 上半径约 3px，
+放大到 256px 是 46px —— 四个角明显是圆的，但整体仍是图块而不是药丸形。
+"""
+CORNER_RATIO = 0.18
 
 # 源图里的分段（由 ink-band 测量得出，见文件头说明）
 BAND_MONOGRAM = (0, 300, 1254, 790)     # 字标：M + 音符 + 声波
@@ -64,6 +72,23 @@ def to_canvas(image: Image.Image, ratio: float) -> Image.Image:
     canvas = Image.new("RGB", (S, S), PAPER)
     canvas.paste(image.resize(size, Image.LANCZOS), ((S - size[0]) // 2, (S - size[1]) // 2))
     return canvas
+
+
+def round_corners(image: Image.Image) -> Image.Image:
+    """
+    把方角白底裁成圆角（四角外侧透明）。
+
+    在 1024 画布上做遮罩、之后才降采样，这样每一档尺寸的圆角都是超采样出来的，
+    16px 上也不会出现台阶。透明区的 RGB 保持纯白 —— 白底压白底，
+    LANCZOS 缩放不会在边缘挤出脏边（这是 RGBA 缩放最常见的坑）。
+    """
+    rgba = image.convert("RGBA")
+    size = rgba.size[0]
+    radius = max(1, round(size * CORNER_RATIO))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=255)
+    rgba.putalpha(mask)
+    return rgba
 
 
 def png_bytes(image: Image.Image) -> bytes:
@@ -102,8 +127,8 @@ def main() -> None:
     full = crop_ink(source.crop(BAND_FULL))
 
     # 整幅作品留白多一些（内容更密），字标可以更满
-    full_art = to_canvas(full, 0.80)
-    mark_art = to_canvas(monogram, 0.88)
+    full_art = round_corners(to_canvas(full, 0.80))
+    mark_art = round_corners(to_canvas(monogram, 0.88))
 
     BUILD.mkdir(parents=True, exist_ok=True)
     ASSETS.mkdir(parents=True, exist_ok=True)
