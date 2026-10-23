@@ -10,8 +10,8 @@
  */
 import { app, BrowserWindow } from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 
 import { APP_CONST, DEFAULT_NAME_TEMPLATE } from '@shared/constants'
 import type { DownloadConfig, DownloadTask } from '@shared/types/download'
@@ -162,7 +162,7 @@ async function bootstrap(): Promise<void> {
   const log = createLogger(join(userData, 'musichub.log'))
   flushLogFile = () => log.flush()
 
-  log('info', 'app', `MusicHub 启动  electron=${process.versions.electron} node=${process.versions.node}`)
+  log('info', 'app', `Mz Hearken 启动  electron=${process.versions.electron} node=${process.versions.node}`)
 
   /** 退出中：所有后台任务看到它就收敛，不再起新活 */
   let shuttingDown = false
@@ -173,7 +173,7 @@ async function bootstrap(): Promise<void> {
   log('info', 'proxy', `本地流代理已启动 http://127.0.0.1:${port}`)
 
   /* --------------------------- 2. 配置存储 --------------------------- */
-  const defaultDownloadDir = join(app.getPath('music'), 'MusicHub')
+  const defaultDownloadDir = join(app.getPath('music'), 'Mz Hearken')
   if (!existsSync(defaultDownloadDir)) {
     try {
       mkdirSync(defaultDownloadDir, { recursive: true })
@@ -400,7 +400,12 @@ if (!gotTheLock) {
   })
 
   app.whenReady().then(async () => {
-    electronApp.setAppUserModelId('com.musichub.app')
+    /**
+     * 改名后先搬数据，再动任何会读 userData 的东西。
+     * 放在 whenReady 里（而不是模块顶层）是为了让 app 的 paths 完全是初始化后的值。
+     */
+    migrateLegacyUserData()
+    electronApp.setAppUserModelId('com.mzhearken.app')
 
     app.on('browser-window-created', (_, window) => {
       optimizer.watchWindowShortcuts(window)
@@ -423,6 +428,67 @@ if (!gotTheLock) {
  * 音源脚本来自第三方，即使沙箱已经做了捕获，仍可能有异步异常逃逸到事件循环。
  * 这类异常绝不能拖垮整个应用，因此统一记录到日志并放行。
  */
+/**
+ * 一次性数据迁移：旧品牌目录 → 新品牌目录。
+ *
+ * 为什么必须有：Electron 的 userData 目录由 app.getName() 决定（= package.json 的
+ * productName）。改名成 Mz Hearken 之后，目录从 `%APPDATA%\musichub` 变成
+ * `%APPDATA%\Mz Hearken` —— 不管的话，用户的收藏 / 歌单 / 已存译文 / 音源脚本
+ * 会"凭空消失"（文件还在，只是程序不再去那个目录找）。
+ *
+ * 三条硬规则：
+ *  1. **只复制、绝不删除**旧目录：万一新目录有问题，用户的原始数据仍完整
+ *  2. 复制失败就**退回旧目录继续用**：宁可路径难看，也不能让用户丢数据
+ *  3. 搬完写标记文件，之后不再重复搬（也不会覆盖新目录里已经产生的数据）
+ */
+function migrateLegacyUserData(): void {
+  const legacyDir = join(app.getPath('appData'), 'musichub')
+  const currentDir = app.getPath('userData')
+  const markerFile = join(currentDir, '.migrated-from-musichub')
+
+  if (existsSync(markerFile) || !existsSync(legacyDir)) return
+  if (resolve(legacyDir).toLowerCase() === resolve(currentDir).toLowerCase()) return
+
+  try {
+    mkdirSync(currentDir, { recursive: true })
+    /**
+     * Chromium 的缓存目录动辄几百 MB、且没有任何迁移价值 → 跳过；
+     * 应用自己的数据（*.json / sources / Local Storage / Network）全部搬过去。
+     */
+    const skipped = new Set([
+      'Cache',
+      'Code Cache',
+      'GPUCache',
+      'DawnGraphiteCache',
+      'DawnWebGPUCache',
+      'blob_storage',
+      'Dictionaries',
+      'Shared Dictionary',
+      'Session Storage',
+      'lockfile',
+      'DevToolsActivePort'
+    ])
+    cpSync(legacyDir, currentDir, {
+      recursive: true,
+      force: false,
+      errorOnExist: false,
+      filter: (source) => {
+        const rel = relative(legacyDir, source)
+        if (!rel) return true
+        return !skipped.has(rel.split(sep)[0] ?? '')
+      }
+    })
+    writeFileSync(markerFile, new Date().toISOString(), 'utf8')
+  } catch {
+    // 搬不动就把 userData 指回旧目录：功能照常，数据不丢
+    try {
+      app.setPath('userData', legacyDir)
+    } catch {
+      /* 连这个都失败，只能以空目录启动 */
+    }
+  }
+}
+
 function logFatal(kind: string, err: unknown): void {
   const message =
     err && typeof err === 'object' && 'message' in err

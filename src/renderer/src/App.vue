@@ -25,6 +25,12 @@ import PlayerBar from './components/PlayerBar.vue'
 import { useSourceStore } from './stores/sources'
 import { useDownloadStore } from './stores/downloads'
 import { useLibraryStore } from './stores/library'
+/**
+ * 品牌标（MZ 单字标，白底）。
+ * 与安装包/任务栏图标同源：都由 scripts/gen-logo.py 生成，
+ * 这样界面上的徽标和任务栏里的图标不可能是两个样子。
+ */
+import brandMark from './assets/brand-mark.png'
 
 const route = useRoute()
 const router = useRouter()
@@ -125,7 +131,18 @@ function go(path: string): void {
   <div class="shell">
     <!-- 极窄图标导航柱 -->
     <nav class="rail">
-      <div class="brand" title="MusicHub · 多音源聚合">MH</div>
+      <!--
+        品牌标：换成 MZ 图形（白底 + 衬线大字），不再是原来那个「MH」色块。
+        32px 的高度里放不下「HEARKEN」那行小字（缩到 3px 只会糊成一团），
+        所以这里只用单字标；完整组合在安装包图标、任务栏图标与窗口标题里。
+      -->
+      <img
+        class="brand"
+        :src="brandMark"
+        alt="Mz Hearken"
+        title="Mz Hearken · 埋子聆听 · 多音源聚合"
+        draggable="false"
+      />
 
       <button
         v-for="item in navItems"
@@ -222,18 +239,22 @@ function go(path: string): void {
   background: var(--surface-1);
 }
 
+/**
+ * 品牌标。
+ *
+ * 原来是个 32px 的墨色方块 + 「MH」两个字（用 --font-display 画的）。
+ * 2.0.1 起换成真正的图形标（MZ，白底衬线），由 scripts/gen-logo.py 统一生成，
+ * 和安装包/任务栏图标共用同一份源图 —— 界面与任务栏不可能再看得出是两套东西。
+ *
+ * 图片本身是白底，所以这里不再设 background；只固定尺寸、去掉选中与拖拽。
+ */
 .brand {
   width: 32px;
   height: 32px;
-  display: grid;
-  place-items: center;
+  display: block;
   margin-bottom: var(--sp-5);
-  background: var(--ink);
-  color: var(--canvas);
-  font-family: var(--font-display);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-bold);
-  letter-spacing: var(--ls-wide);
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 /**

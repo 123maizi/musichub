@@ -257,7 +257,7 @@ function writeId3v23(
  * ------------------------------------------------------------------ */
 
 function buildVorbisComment(tag: TagInput): Buffer {
-  const vendor = Buffer.from('MusicHub', 'utf8')
+  const vendor = Buffer.from('Mz Hearken', 'utf8')
   const entries: [string, string][] = [
     ['TITLE', tag.title],
     ['ARTIST', tag.artist],

@@ -1,9 +1,10 @@
 {
   "name": "musichub",
-  "version": "2.0.0",
-  "description": "MusicHub - 多音源音乐聚合播放与下载器",
+  "productName": "Mz Hearken",
+  "version": "2.0.1",
+  "description": "Mz Hearken（埋子 · 聆听）- 多音源音乐聚合播放与下载器",
   "main": "./out/main/index.js",
-  "author": "MusicHub",
+  "author": "埋子 (Mz)",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",

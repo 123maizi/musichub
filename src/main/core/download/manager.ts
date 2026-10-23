@@ -591,7 +591,7 @@ export class DownloadManager extends EventEmitter {
           albumArtist: String(task.song.singer ?? '').split(/[&、/]/)[0]?.trim() || task.song.singer,
           year: this.pickYear(task.song),
           coverUrl: config.downloadCover ? coverUrl : undefined,
-          comment: `MusicHub · ${PLATFORM_META[task.song.platform]?.name ?? task.song.platform}`
+          comment: `Mz Hearken · ${PLATFORM_META[task.song.platform]?.name ?? task.song.platform}`
         })
       } catch (err) {
         this.deps.onLog?.('warn', 'download', `写入标签失败（不影响文件）: ${errMsg(err)}`)

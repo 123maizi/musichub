@@ -14,7 +14,7 @@ export function createWindow(): BrowserWindow {
     minHeight: 660,
     show: false,
     autoHideMenuBar: true,
-    title: 'MusicHub',
+    title: 'Mz Hearken',
     // 深色底，避免加载瞬间白屏闪一下
     backgroundColor: '#0b0b0f',
     webPreferences: {

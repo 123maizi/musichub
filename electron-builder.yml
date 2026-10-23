@@ -1,9 +1,14 @@
 ## electron-builder 打包配置
 ## 注意 extraResources：内置音源必须随安装包分发到 resources/sources，
 ## 主进程会从 process.resourcesPath/sources 读取（见 src/main/index.ts）。
-appId: com.musichub.app
-productName: MusicHub
-copyright: MusicHub
+##
+## 品牌：Mz Hearken（埋子 · 聆听）
+## ⚠️ appId 与 productName 一起改了名，Electron 的 userData 目录会跟着变，
+##    因此 src/main/index.ts 里有一段**一次性数据迁移**（把旧 %APPDATA%\musichub
+##    下的收藏/歌单/译文/音源搬到新目录）。改这两个字段前先看那段代码。
+appId: com.mzhearken.app
+productName: Mz Hearken
+copyright: Mz Hearken
 
 directories:
   buildResources: build
@@ -29,7 +34,8 @@ win:
     - target: nsis
       arch:
         - x64
-  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  ## 产物名刻意不带空格：release 资源名会进 URL
+  artifactName: MzHearken-${version}-win-${arch}.${ext}
 
 nsis:
   oneClick: false
@@ -37,7 +43,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: MusicHub
+  shortcutName: Mz Hearken
 
 mac:
   target:
@@ -46,11 +52,11 @@ mac:
         - arm64
         - x64
   category: public.app-category.music
-  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  artifactName: MzHearken-${version}-mac-${arch}.${ext}
 
 linux:
   target:
     - AppImage
     - deb
   category: Audio
-  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+  artifactName: MzHearken-${version}-linux-${arch}.${ext}

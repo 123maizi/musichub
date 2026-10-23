@@ -102,7 +102,11 @@ if (rel && rel.id) {
 console.log(`    ${rel.html_url}`)
 
 /* ---------------- 2. 上传安装包 ---------------- */
-const assetName = `MusicHub-${version}-win-x64.exe`
+/**
+ * 发布资源名必须和 electron-builder.yml 的 artifactName 一致
+ * （2.0.1 起品牌改为 Mz Hearken，产物名不带空格，免得 URL 里出现 %20）
+ */
+const assetName = `MzHearken-${version}-win-x64.exe`
 const size = statSync(assetPath).size
 console.log(`\n[2] 上传 ${assetName}  (${(size / 1024 / 1024).toFixed(2)} MB)`)
 

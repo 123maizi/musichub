@@ -11,6 +11,8 @@
  *  - 失败的项打印足够定位的细节，不吞异常
  *  - 只读为主；会产生副作用的项（下载）写到临时目录，跑完清理
  */
+import { readFileSync } from 'node:fs'
+
 const PORT = Number(process.argv[2] || 9222)
 const BASE = `http://127.0.0.1:${PORT}`
 const TEST_DIR = 'F:\\MusicHub\\.tmp\\acceptance-dl'
@@ -116,9 +118,28 @@ async function goView(hash, expectSelector, timeoutMs = 15000) {
 
 /* ------------------------------ 各项检查 ------------------------------ */
 
+/**
+ * 期望的应用名，从 package.json 的 productName 读。
+ *
+ * 原来这里写死 `/musichub/i`：品牌一改名（2.0.1 → Mz Hearken）验收就假报警
+ * 「拿到的不是 MusicHub 页面」。改名的正确代价不该由测试来付 ——
+ * 让测试跟着 productName 走，以后再改名不会再误报。
+ *
+ * ⚠️ 比较时必须**去掉空白**：Electron 拼 UA 时会把 productName 里的空格删掉，
+ * 实际发出来的是 `MzHearken/2.0.1`，而 productName 是 `Mz Hearken`。
+ */
+const PRODUCT_NAME = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).productName ?? 'Mz Hearken'
+
+const squeeze = (value) => String(value ?? '').replace(/\s+/g, '').toLowerCase()
+
 async function checkEnv() {
   const info = await inPage(`return { ua: navigator.userAgent, hash: location.hash }`)
-  if (!/musichub/i.test(info?.ua ?? '')) throw new Error('拿到的不是 MusicHub 页面')
+  if (!/electron/i.test(info?.ua ?? '')) throw new Error('拿到的不是 Electron 页面')
+  if (!squeeze(info.ua).includes(squeeze(PRODUCT_NAME))) {
+    throw new Error(`UA 里没有应用名「${PRODUCT_NAME}」：${info.ua}`)
+  }
   return info
 }
 
@@ -424,7 +445,13 @@ async function main() {
   await connect()
 
   const steps = [
-    ['运行环境', async () => `Electron OK · ${(await checkEnv()).ua.match(/musichub\/[\d.]+/)?.[0] ?? '?'}`],
+    [
+      '运行环境',
+      async () => {
+        const env = await checkEnv()
+        return `Electron OK · ${env.ua.slice(0, 120)}`
+      }
+    ],
     ['音源装载', checkSources],
     ['搜索（5 平台）', checkSearch],
     ['播放（网络取流）', checkPlayback],
@@ -469,7 +496,7 @@ async function main() {
 
   console.log('')
   console.log('='.repeat(72))
-  console.log('MusicHub 全功能验收')
+  console.log(`${PRODUCT_NAME} 全功能验收`)
   console.log('='.repeat(72))
   for (const r of results) {
     console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}`)

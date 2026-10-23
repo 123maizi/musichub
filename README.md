@@ -1,6 +1,10 @@
-# MusicHub
+# Mz Hearken
+
+<img src="build/icon.png" alt="Mz Hearken" width="132" />
 
 **多音源音乐聚合播放与下载器** · 桌面端（Electron + Vue 3 + TypeScript）
+
+> `Mz` = 埋子，`Hearken` = 专注地聆听。
 
 搜得到、接得上、放得出 —— 一个把「聚合搜索 + 第三方音源 + 本地代理」三件事做完整的桌面音乐工具。
 

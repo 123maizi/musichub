@@ -476,7 +476,7 @@ export function registerIpc(ctx: IpcContext): () => void {
   /* ------------------------------ 应用 ------------------------------ */
 
   ipcMain.handle(CH.appInfo, (): AppInfo => ({
-    name: 'MusicHub',
+    name: 'Mz Hearken',
     version: app.getVersion(),
     electron: process.versions.electron ?? '',
     chrome: process.versions.chrome ?? '',
